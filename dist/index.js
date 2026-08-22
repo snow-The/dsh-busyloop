@@ -5520,7 +5520,7 @@ function registerBusyloopRun(ctx) {
   );
 }
 function registerKeyTools(ctx) {
-  const reg = ctx.tools?.register;
+  const reg = ctx.tools?.register?.bind(ctx.tools);
   if (!reg) return;
   reg(defineTool({
     name: "busyloop_key_add",

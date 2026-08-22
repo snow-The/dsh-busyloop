@@ -231,7 +231,8 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
 }
 
 function registerKeyTools(ctx: { tools?: { register: (def: unknown) => unknown } }): void {
-  const reg = ctx.tools?.register
+  // NOTE: register is a class method using `this.layers` — must keep `this` bound.
+  const reg = ctx.tools?.register?.bind(ctx.tools)
   if (!reg) return
   reg(defineTool({
     name: 'busyloop_key_add',
