@@ -2262,6 +2262,26 @@ function getRuntime(channelKey) {
   }
   return { llm: built.llm, channel };
 }
+var DISCIPLINE_SYSTEM = [
+  "\u4F60\u662F\u6267\u884C\u5B50\u4EFB\u52A1\u7684 agent\u3002\u9075\u5B88\u4EE5\u4E0B\u5F00\u53D1\u7EAA\u5F8B(\u6E90\u81EA\u7ECF\u5178\u5DE5\u7A0B\u8457\u4F5C\u7684\u63D0\u70BC):",
+  '1. \u547D\u540D\u8868\u8FBE\u610F\u56FE;\u51FD\u6570\u4FDD\u6301\u5355\u4E00\u804C\u8D23(\u8D85\u8FC7 ~20 \u884C\u6216\u80FD\u62C6\u51FA\u7B2C\u4E8C\u4E2A"\u505A"\u5B57\u5C31\u62C6);\u53C2\u6570 >2 \u9700\u7406\u7531\u3002',
+  '2. \u6CE8\u91CA\u53EA\u5199"\u4E3A\u4EC0\u4E48",\u4E0D\u5199"\u4EC0\u4E48/\u600E\u4E48";\u4E0D\u4F20\u9012/\u4E0D\u8FD4\u56DE null;\u9519\u8BEF\u7528\u5F02\u5E38\u800C\u975E\u9519\u8BEF\u7801\u3002',
+  "3. \u4EFB\u4F55\u884C\u4E3A\u53D8\u66F4\u5148\u5199/\u6539\u6D4B\u8BD5;\u6D4B\u8BD5\u65AD\u8A00\u884C\u4E3A,\u4E0D\u6D4B\u5B9E\u73B0\u7EC6\u8282\u3002",
+  "4. \u91CD\u6784 = \u884C\u4E3A\u4E0D\u53D8\u7684\u7ED3\u6784\u8C03\u6574;\u5C0F\u6B65\u524D\u8FDB\u3001\u6BCF\u6B65\u53EF\u8FD0\u884C;\u529F\u80FD\u63D0\u4EA4\u4E0E\u91CD\u6784\u63D0\u4EA4\u5206\u79BB\u3002",
+  "5. \u6D89\u53CA\u6570\u636E:\u6539 schema \u5FC5\u987B\u517C\u5BB9\u65E7\u6570\u636E(\u53CC\u5411\u517C\u5BB9);\u5199\u64CD\u4F5C\u9ED8\u8BA4\u9700\u5E42\u7B49(\u91CD\u590D/\u4E71\u5E8F\u662F\u5E38\u6001);\u5148\u4F30\u7B97\u8D1F\u8F7D\u518D\u5B9A\u65B9\u6848\u3002",
+  "6. \u8BBE\u8BA1:\u5148\u6F84\u6E05\u9700\u6C42(\u529F\u80FD/\u975E\u529F\u80FD/\u89C4\u6A21/\u7EA6\u675F)\u518D\u51FA\u65B9\u6848;\u6BCF\u4E2A\u9009\u62E9\u663E\u5F0F\u6743\u8861;\u68C0\u67E5\u5355\u70B9\u6545\u969C\u4E0E\u964D\u7EA7\u8DEF\u5F84\u3002",
+  "7. \u5148\u5B9A\u4E49\u4F53\u9A8C/\u884C\u4E3A\u76EE\u6807,\u518D\u5199\u5B9E\u73B0;\u539F\u578B\u5148\u884C;\u7B2C\u4E09\u6B21\u51FA\u73B0\u76F8\u540C\u7247\u6BB5\u624D\u62BD\u8C61,\u7981\u6B62\u590D\u5236\u7C98\u8D34\u53D8\u4F53\u3002",
+  "8. \u5148\u6478\u6E05\u7ED3\u6784\u518D\u6DF1\u5165\u7EC6\u8282;\u5173\u952E\u63A8\u65AD\u8981\u9A8C\u8BC1;\u7ED3\u8BBA\u533A\u5206\u4E8B\u5B9E/\u63A8\u65AD/\u731C\u6D4B,\u4E0D\u628A\u731C\u6D4B\u5F53\u7ED3\u8BBA\u3002",
+  "9. \u53EA\u901A\u8FC7\u53EF\u7528\u5DE5\u5177\u83B7\u5F97\u7ED3\u679C,\u4E0D\u81C6\u9020\u8F93\u51FA;\u5982\u5B9E\u6C47\u62A5\u6210\u529F\u4E0E\u5931\u8D25,\u4E0D\u63A9\u76D6\u9519\u8BEF\u3002"
+].join("\n");
+function resolveSystem(custom, discipline) {
+  const customStr = typeof custom === "string" && custom.trim() ? custom : void 0;
+  if (discipline === false) return customStr;
+  if (customStr) return `${DISCIPLINE_SYSTEM}
+
+${customStr}`;
+  return DISCIPLINE_SYSTEM;
+}
 function registerBusyloopRun(ctx) {
   ctx.tools?.register(
     defineTool({
@@ -2279,7 +2299,11 @@ function registerBusyloopRun(ctx) {
         },
         system: {
           type: "string",
-          description: "Optional system prompt for the sub-loop."
+          description: "Optional system prompt for the sub-loop. When set, it is appended after the built-in discipline prompt (unless discipline is false)."
+        },
+        discipline: {
+          type: "boolean",
+          description: "Inject the built-in development-discipline system prompt (distilled from Clean Code/Refactoring/DDIA/SysDesign/game-design/reversing). Default true."
         },
         maxTurns: {
           type: "number",
@@ -2311,7 +2335,7 @@ function registerBusyloopRun(ctx) {
             provider: "deepseek",
             model: channel.model,
             prompt: String(args.prompt),
-            system: args.system ? String(args.system) : void 0,
+            system: resolveSystem(args.system, args.discipline),
             maxTurns: args.maxTurns ? Number(args.maxTurns) : void 0,
             maxTokens: args.maxTokens ? Number(args.maxTokens) : void 0,
             signal: exec?.signal,
@@ -2354,6 +2378,7 @@ function createBusyLoop(ctx) {
   };
 }
 export {
+  DISCIPLINE_SYSTEM,
   apply,
   createBusyLoop,
   createHonoApp,

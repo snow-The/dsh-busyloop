@@ -17,6 +17,13 @@ export declare function createHonoApp(deps?: {
     llm?: Parameters<typeof hostLlm>[0];
 }): Hono;
 /**
+ * Built-in discipline system prompt for sub-loops (distilled from classic
+ * engineering books: Clean Code / Refactoring / DDIA / System Design
+ * Interview / game-design practices / reverse-engineering methodology).
+ * Injected by default; opt out with discipline:false or override with system.
+ */
+export declare const DISCIPLINE_SYSTEM: string;
+/**
  * Plugin entry: mount health/providers endpoints + register the agent tool.
  * ctx.tools is optional — hosts without a tool registry still get the engine.
  */

@@ -116,6 +116,33 @@ function getRuntime(channelKey: keyof typeof CHANNELS): { llm: HostLlm; channel:
   return { llm: built.llm, channel }
 }
 
+/**
+ * Built-in discipline system prompt for sub-loops (distilled from classic
+ * engineering books: Clean Code / Refactoring / DDIA / System Design
+ * Interview / game-design practices / reverse-engineering methodology).
+ * Injected by default; opt out with discipline:false or override with system.
+ */
+export const DISCIPLINE_SYSTEM = [
+  '你是执行子任务的 agent。遵守以下开发纪律(源自经典工程著作的提炼):',
+  '1. 命名表达意图;函数保持单一职责(超过 ~20 行或能拆出第二个"做"字就拆);参数 >2 需理由。',
+  '2. 注释只写"为什么",不写"什么/怎么";不传递/不返回 null;错误用异常而非错误码。',
+  '3. 任何行为变更先写/改测试;测试断言行为,不测实现细节。',
+  '4. 重构 = 行为不变的结构调整;小步前进、每步可运行;功能提交与重构提交分离。',
+  '5. 涉及数据:改 schema 必须兼容旧数据(双向兼容);写操作默认需幂等(重复/乱序是常态);先估算负载再定方案。',
+  '6. 设计:先澄清需求(功能/非功能/规模/约束)再出方案;每个选择显式权衡;检查单点故障与降级路径。',
+  '7. 先定义体验/行为目标,再写实现;原型先行;第三次出现相同片段才抽象,禁止复制粘贴变体。',
+  '8. 先摸清结构再深入细节;关键推断要验证;结论区分事实/推断/猜测,不把猜测当结论。',
+  '9. 只通过可用工具获得结果,不臆造输出;如实汇报成功与失败,不掩盖错误。',
+].join('\n')
+
+/** Merge the caller's system prompt with the built-in discipline prompt. */
+function resolveSystem(custom: unknown, discipline: unknown): string | undefined {
+  const customStr = typeof custom === 'string' && custom.trim() ? custom : undefined
+  if (discipline === false) return customStr
+  if (customStr) return `${DISCIPLINE_SYSTEM}\n\n${customStr}`
+  return DISCIPLINE_SYSTEM
+}
+
 function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknown } }): void {
   ctx.tools?.register(
     defineTool({
@@ -134,7 +161,11 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
         },
         system: {
           type: 'string',
-          description: 'Optional system prompt for the sub-loop.',
+          description: 'Optional system prompt for the sub-loop. When set, it is appended after the built-in discipline prompt (unless discipline is false).',
+        },
+        discipline: {
+          type: 'boolean',
+          description: 'Inject the built-in development-discipline system prompt (distilled from Clean Code/Refactoring/DDIA/SysDesign/game-design/reversing). Default true.',
         },
         maxTurns: {
           type: 'number',
@@ -167,7 +198,7 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
             provider: 'deepseek',
             model: channel.model,
             prompt: String(args.prompt),
-            system: args.system ? String(args.system) : undefined,
+            system: resolveSystem(args.system, args.discipline),
             maxTurns: args.maxTurns ? Number(args.maxTurns) : undefined,
             maxTokens: args.maxTokens ? Number(args.maxTokens) : undefined,
             signal: exec?.signal,
