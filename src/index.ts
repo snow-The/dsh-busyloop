@@ -6,6 +6,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { Hono } from 'hono'
 import yaml from 'js-yaml'
 import { hostLlm } from './llm.ts'
+import * as keyStore from './keys.ts'
 import { runBusyLoop } from './loop.ts'
 import type { HostLlm } from './llm.ts'
 import type { BusyLoopOptions, LoopEvent, LoopResult, LoopTool } from './types.ts'
@@ -184,14 +185,16 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
       async execute(args: any, exec: any) {
         const channelKey: 'ark' | 'direct' = args.channel === 'direct' ? 'direct' : 'ark'
         const { llm, channel } = getRuntime(channelKey)
-        const key = loadKey(channel.keyEnv)
+        const resolved = keyStore.resolveEffectiveKey(loadKey, channel.keyEnv)
+        const key = resolved.key
         if (!key) {
           return JSON.stringify({
             ok: false,
-            error: `No ${channel.keyEnv} found (checked env and ${credentialsPath()})`,
+            error: `No ${channel.keyEnv} found (checked session keys, env and ${credentialsPath()})`,
           })
         }
         process.env[channel.keyEnv] = key
+        const keyUsed = resolved.alias ? `${resolved.alias}(${resolved.masked})` : resolved.masked ?? 'unknown'
 
         try {
           const result = await runBusyLoop(llm, {
@@ -208,6 +211,7 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
             ok: true,
             channel: channelKey,
             model: channel.model,
+            key: keyUsed,
             output: result.output,
             turns: result.turns,
             toolCalls: result.toolCalls,
@@ -226,6 +230,70 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
   )
 }
 
+function registerKeyTools(ctx: { tools?: { register: (def: unknown) => unknown } }): void {
+  const reg = ctx.tools?.register
+  if (!reg) return
+  reg(defineTool({
+    name: 'busyloop_key_add',
+    description: 'Register a per-session API key for busyloop_run (stored in ~/.dsh/busyloop-keys.json, 0600; NEVER written to env or global credentials). chat scope = selectable from this chat; subagent scope = reserved for subagent loops. Returns masked alias only.',
+    parameters: {
+      alias: { type: 'string', description: 'Short label, e.g. alice-ark', required: true },
+      key: { type: 'string', description: 'The API key (min 8 chars)', required: true },
+      scope: { type: 'string', description: 'chat (default) or subagent' },
+    },
+    output: { schema: { type: 'string' }, render: (_a: unknown, v: string) => [{ type: 'text', text: v }] },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async execute(args: any) {
+      try {
+        const scope = args.scope === 'subagent' ? 'subagent' : 'chat'
+        const entry = keyStore.addKey(String(args.alias), String(args.key), scope)
+        return JSON.stringify({ ok: true, alias: entry.alias, scope: entry.scope, masked: keyStore.maskKey(entry.key) })
+      } catch (err) {
+        return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) })
+      }
+    },
+  }))
+  reg(defineTool({
+    name: 'busyloop_key_list',
+    description: 'List registered busyloop keys: alias + masked tail only (never the full key). Marks the currently active chat-scope key.',
+    parameters: {},
+    output: { schema: { type: 'string' }, render: (_a: unknown, v: string) => [{ type: 'text', text: v }] },
+    async execute() {
+      return JSON.stringify({ ok: true, keys: keyStore.listKeys() })
+    },
+  }))
+  reg(defineTool({
+    name: 'busyloop_key_remove',
+    description: 'Remove a registered busyloop key by alias.',
+    parameters: {
+      alias: { type: 'string', description: 'Alias of the key to remove', required: true },
+    },
+    output: { schema: { type: 'string' }, render: (_a: unknown, v: string) => [{ type: 'text', text: v }] },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async execute(args: any) {
+      const removed = keyStore.removeKey(String(args.alias))
+      return JSON.stringify({ ok: removed, removed: removed ? String(args.alias) : null })
+    },
+  }))
+  reg(defineTool({
+    name: 'busyloop_key_use',
+    description: 'Select a chat-scope busyloop key for THIS conversation: subsequent busyloop_run calls bill to it. Only chat-scope keys can be selected. Shows masked tail.',
+    parameters: {
+      alias: { type: 'string', description: 'Alias of the chat-scope key to activate', required: true },
+    },
+    output: { schema: { type: 'string' }, render: (_a: unknown, v: string) => [{ type: 'text', text: v }] },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async execute(args: any) {
+      try {
+        const info = keyStore.useKey(String(args.alias))
+        return JSON.stringify({ ...info })
+      } catch (err) {
+        return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) })
+      }
+    },
+  }))
+}
+
 /**
  * Plugin entry: mount health/providers endpoints + register the agent tool.
  * ctx.tools is optional — hosts without a tool registry still get the engine.
@@ -241,6 +309,7 @@ export function apply(ctx: {
     /* host without http mount: engine still usable as library */
   }
   registerBusyloopRun(ctx)
+  registerKeyTools(ctx)
 }
 
 /** Wrap the host ctx into a ready-to-use engine handle. */
