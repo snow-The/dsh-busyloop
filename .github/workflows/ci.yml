@@ -31,7 +31,7 @@ jobs:
       - name: Install
         run: |
           if [ ! -f package.json ]; then echo "no package.json, skipping"; exit 0; fi
-          pnpm install --no-frozen-lockfile --config.auto-install-peers=false
+          pnpm install --no-frozen-lockfile --config.auto-install-peers=true
 
       - name: Build
         run: |
