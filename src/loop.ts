@@ -59,6 +59,7 @@ export async function runBusyLoop(llm: HostLlm, opts: BusyLoopOptions): Promise<
       temperature: opts.temperature,
       maxTokens: opts.maxTokens,
       signal: opts.signal,
+      sessionId: opts.sessionId as GenerateOptions['sessionId'],
     }
 
     const asm = new BlockAssembler()

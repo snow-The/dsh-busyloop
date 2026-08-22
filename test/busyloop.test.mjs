@@ -187,6 +187,17 @@ test('health endpoint responds 200 and apply mounts', async () => {
   assert.equal(res2.status, 200)
 })
 
+test('sessionId is stamped on every generation', async () => {
+  const { service, seenOptions } = fakeLlm([textChunks('ok')])
+  await runBusyLoop(hostLlm(service), {
+    provider: 'deepseek',
+    model: 'deepseek-chat',
+    prompt: 'p',
+    sessionId: 'sess-abc',
+  })
+  assert.equal(seenOptions()[0].sessionId, 'sess-abc')
+})
+
 test('providers endpoint lists host providers when llm service present', async () => {
   const { service } = fakeLlm([textChunks('x')])
   const app = createHonoApp({ llm: service })

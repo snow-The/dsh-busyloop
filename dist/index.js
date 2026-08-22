@@ -2133,7 +2133,8 @@ async function runBusyLoop(llm, opts) {
       })),
       temperature: opts.temperature,
       maxTokens: opts.maxTokens,
-      signal: opts.signal
+      signal: opts.signal,
+      sessionId: opts.sessionId
     };
     const asm = new BlockAssembler();
     for await (const chunk of llm.stream(gen)) asm.push(chunk);

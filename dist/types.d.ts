@@ -24,6 +24,11 @@ export interface BusyLoopOptions {
     temperature?: number;
     maxTokens?: number;
     signal?: AbortSignal;
+    /**
+     * Session identity stamped on every generation for request routing
+     * (replay cursor separation, transport metadata).
+     */
+    sessionId?: string;
     /** Progress callback. */
     onEvent?: (ev: LoopEvent) => void;
 }
