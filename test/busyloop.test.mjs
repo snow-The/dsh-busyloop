@@ -217,3 +217,41 @@ test('providers endpoint degrades to empty list without llm service', async () =
 test('apply tolerates host without http mount', () => {
   apply({})
 })
+
+test('apply registers the busyloop_run agent tool when ctx.tools present', () => {
+  const registered = []
+  apply({ tools: { register: (def) => registered.push(def) } })
+  const names = registered.map((d) => d.name)
+  assert.deepEqual(names, ['busyloop_run'])
+})
+
+test('apply tolerates host without tool registry', () => {
+  apply({ http: {} })
+})
+
+test('busyloop_run fails cleanly without a key (no API call)', async () => {
+  const registered = []
+  apply({ tools: { register: (def) => registered.push(def) } })
+  const run = registered.find((d) => d.name === 'busyloop_run')
+
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const home = await mkdtemp(join(tmpdir(), 'bl-home-'))
+  const prevHome = process.env.USERPROFILE
+  const prevArk = process.env.ARK_API_KEY
+  process.env.USERPROFILE = home
+  delete process.env.ARK_API_KEY
+  try {
+    const raw = await run.execute({ prompt: 'Say hi' })
+    const out = JSON.parse(raw)
+    assert.equal(out.ok, false)
+    assert.match(out.error, /No ARK_API_KEY found/)
+  } finally {
+    if (prevHome === undefined) delete process.env.USERPROFILE
+    else process.env.USERPROFILE = prevHome
+    if (prevArk === undefined) delete process.env.ARK_API_KEY
+    else process.env.ARK_API_KEY = prevArk
+    await rm(home, { recursive: true, force: true })
+  }
+})
