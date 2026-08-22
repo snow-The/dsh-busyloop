@@ -3,6 +3,14 @@ import { hostLlm } from './llm.ts';
 import type { HostLlm } from './llm.ts';
 import type { BusyLoopOptions, LoopResult } from './types.ts';
 export declare const name = "dsh-busyloop";
+/**
+ * cordis rule (crash lesson, 0.1.6): reading a REGISTERED service property off
+ * ctx (e.g. ctx.tools) THROWS "cannot get property X without inject" unless the
+ * service is declared here — optional chaining does NOT help (the proxy get
+ * trap throws). ctx.http/ctx.llm are intentionally NOT declared: on this host
+ * they are absent (read yields undefined) or only reached in guarded callbacks.
+ */
+export declare const inject: string[];
 export declare const description = "DSH agent-loop engine: host-LLM adapter (official ctx.llm channel) + lightweight loop skeleton + agent tool busyloop_run (one-off tasks on a chosen channel \u2014 Volcano Ark plan API by default \u2014 main-model tokens untouched). Capability layer \u2014 codex style is opt-in via dsh-busyloop-codexstyle.";
 /** Standalone Hono app (mounted by apply() under /api/busyloop). */
 export declare function createHonoApp(deps?: {

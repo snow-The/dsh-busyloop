@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-const { name, apply, createHonoApp, createBusyLoop, hostLlm, runBusyLoop } = await import('../dist/index.js')
+const { name, apply, createHonoApp, createBusyLoop, hostLlm, runBusyLoop, inject } = await import('../dist/index.js')
 
 /** Build a fake host LLM service that replays per-call chunk sequences. */
 function fakeLlm(sequences) {
@@ -50,6 +50,15 @@ test('exports name/apply/createBusyLoop', () => {
   assert.equal(name, 'dsh-busyloop')
   assert.equal(typeof apply, 'function')
   assert.equal(typeof createBusyLoop, 'function')
+})
+
+test('declares inject for every ctx service it reads (tools)', () => {
+  // cordis lesson (0.1.6 crash): reading a REGISTERED service property off ctx
+  // throws "cannot get property X without inject" — optional chaining does NOT
+  // help (the proxy get trap throws). tools is the only registered service
+  // this plugin reads, so it must be listed.
+  assert.ok(Array.isArray(inject), 'inject must be an array')
+  assert.ok(inject.includes('tools'), 'ctx.tools is read in apply — must be injected')
 })
 
 test('multi-turn loop: tool call then final text', async () => {

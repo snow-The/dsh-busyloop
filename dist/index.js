@@ -5244,6 +5244,7 @@ async function runBusyLoop(llm, opts) {
 
 // src/index.ts
 var name = "dsh-busyloop";
+var inject = ["tools"];
 var description = "DSH agent-loop engine: host-LLM adapter (official ctx.llm channel) + lightweight loop skeleton + agent tool busyloop_run (one-off tasks on a chosen channel \u2014 Volcano Ark plan API by default \u2014 main-model tokens untouched). Capability layer \u2014 codex style is opt-in via dsh-busyloop-codexstyle.";
 function createHonoApp(deps) {
   const app = new Hono2();
@@ -5413,6 +5414,7 @@ export {
   createHonoApp,
   description,
   hostLlm,
+  inject,
   name,
   runBusyLoop
 };
