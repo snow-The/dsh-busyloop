@@ -187,6 +187,22 @@ test('health endpoint responds 200 and apply mounts', async () => {
   assert.equal(res2.status, 200)
 })
 
+test('providers endpoint lists host providers when llm service present', async () => {
+  const { service } = fakeLlm([textChunks('x')])
+  const app = createHonoApp({ llm: service })
+  const res = await app.fetch(new Request('http://localhost/providers'))
+  assert.equal(res.status, 200)
+  const body = await res.json()
+  assert.deepEqual(body.providers, [{ id: 'deepseek' }])
+})
+
+test('providers endpoint degrades to empty list without llm service', async () => {
+  const app = createHonoApp()
+  const res = await app.fetch(new Request('http://localhost/providers'))
+  assert.equal(res.status, 200)
+  assert.deepEqual((await res.json()).providers, [])
+})
+
 test('apply tolerates host without http mount', () => {
   apply({})
 })

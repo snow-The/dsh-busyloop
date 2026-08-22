@@ -2179,14 +2179,23 @@ async function runBusyLoop(llm, opts) {
 // src/index.ts
 var name = "dsh-busyloop";
 var description = "DSH agent-loop engine: host-LLM adapter (official ctx.llm channel) + lightweight loop skeleton. Capability layer \u2014 codex style is opt-in via dsh-busyloop-codexstyle.";
-function createHonoApp() {
+function createHonoApp(deps) {
   const app = new Hono2();
   app.get("/health", (c) => c.json({ ok: true, plugin: name, engine: true, hostLlm: true }));
+  app.get("/providers", (c) => {
+    if (!deps?.llm) return c.json({ providers: [] });
+    try {
+      const providers = hostLlm(deps.llm).listProviders().map((p) => ({ id: p.id ?? String(p) }));
+      return c.json({ providers });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
   return app;
 }
 function apply(ctx) {
   try {
-    ctx.http?.mount?.("/api/busyloop", createHonoApp());
+    ctx.http?.mount?.("/api/busyloop", createHonoApp({ llm: ctx.llm }));
   } catch {
   }
 }
