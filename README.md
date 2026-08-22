@@ -45,11 +45,11 @@ const result = await engine.run({
 | `/health` | 引擎存活 + hostLlm 状态 |
 | `/providers` | 宿主已注册的 LLM provider 列表 |
 
-## 测试金字塔(13 个测试)
+## 测试金字塔(14 个测试)
 
-1. **单元/集成**:fake chunks(不碰真模型)——多轮循环、工具参数解析、结果回填、maxTurns 截断、未知/抛错工具、providers/health 端点
+1. **单元/集成**(`npm test`,node --test 串行):fake chunks(不碰真模型)——多轮循环、工具参数解析、结果回填、maxTurns 截断、未知/抛错工具、providers/health 端点、sessionId 透传
 2. **宿主解析链验证**:dist 放入宿主 node_modules 树加载(官方包全部宿主解析)
-3. **真机 E2E**:真实 DeepSeekAdapter + 真实模型(纯对话 + 多轮工具调用,`cacheReadTokens` 命中验证)
+3. **真机 E2E**(`node e2e/e2e-host.mjs`,手动运行,需要真 API key):真实 DeepSeekAdapter + 真实模型(纯对话 + 多轮工具调用,`cacheReadTokens` 命中验证)
 
 ## 发布
 
