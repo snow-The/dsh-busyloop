@@ -38,12 +38,16 @@ const result = await engine.run({
 
 纯库方式:`hostLlm(ctx.llm)` → `runBusyLoop(llm, options)`。
 
-## HTTP 端点(apply 挂载于 /api/busyloop)
+## HTTP 端点(仅当宿主提供 http.mount 时挂载)
 
 | 端点 | 说明 |
 |---|---|
 | `/health` | 引擎存活 + hostLlm 状态 |
 | `/providers` | 宿主已注册的 LLM provider 列表 |
+
+> ⚠️ 注意:官方宿主当前**未注入** `ctx.http.mount`,这些端点默认不暴露(404)。
+> 引擎的正确使用方式是库 API:`createBusyLoop(ctx)` / `runBusyLoop(llm, opts)`(见上方用法)。
+> 端点代码保留,供未来提供 http.mount 的宿主使用。
 
 ## 测试金字塔(14 个测试)
 
