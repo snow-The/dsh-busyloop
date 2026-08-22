@@ -1,6 +1,6 @@
 {
   "name": "@snow-the/dsh-busyloop",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "DSH agent-loop engine: host-LLM adapter (official ctx.llm channel) + lightweight loop skeleton + agent tool busyloop_run (one-off tasks on ark/direct channels, main-model tokens untouched). Capability layer — codex style is opt-in via dsh-busyloop-codexstyle.",
   "type": "module",
   "main": "./dist/index.js",
@@ -11,7 +11,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc --emitDeclarationOnly && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:@deepseek-ai/*",
+    "build": "tsc --emitDeclarationOnly && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:@deepseek-ai/* --external:js-yaml",
     "test": "node --test --test-concurrency=1"
   },
   "keywords": [
@@ -28,13 +28,16 @@
     }
   },
   "dependencies": {
-    "@deepseek-ai/dsh-tools": "0.1.1-rc.2",
     "js-yaml": "^4.1.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "0.1.1-rc.2"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
     "@deepseek-ai/dsh-llm": "0.1.1-rc.2",
     "@deepseek-ai/dsh-llm-deepseek": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.1.1-rc.2",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.20.1",
     "esbuild": "^0.24.2",

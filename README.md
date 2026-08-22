@@ -62,3 +62,11 @@ pnpm build        # tsc 类型 + esbuild bundle(官方包 external,宿主提供)
 npm test          # node --test
 npm publish       # GitHub Packages(@snow-the 下同款流程)
 ```
+
+## 安装(重要)
+
+1. **dependencies 与 bundles 都要加**:只在 dependencies 里加会被 pnpm 装入 node_modules 但**不会被挂载**(loader 只应用 bundles 里声明的包的 bundle patch);必须同时把 `@snow-the/dsh-busyloop` 加进 `dsh.profile.bundles`,它的 cordis.patch.yml 才会生效、`busyloop_run` 工具才会注册。
+
+2. **宿主包不声明为运行时依赖**:`@deepseek-ai/dsh-tools` 是宿主提供的包(经 dsh-base bundle 装入),本插件只把它声明为 **peerDependency**。把它放进 dependencies 会把 dsh-tools 拉进 profile 的依赖图,在"安装后立即重启"的窗口期可能让宿主工具调度器(Symbol 键)解析到第二个模块实例,导致首次工具调用崩溃(`Cannot read properties of undefined (reading 'prepare')`)——这是 0.1.6 的教训(2026-08-22 崩溃),0.1.7 起改为 peer 声明。
+
+3. **重启时序**:`pnpm install` 必须完整跑完(等到提示 Done)再重启 dsh web;不要在安装进行中重启。
