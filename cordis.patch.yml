@@ -1,0 +1,3 @@
+# dsh-busyloop — DSH agent-loop engine
+# 引擎层:LLM 适配器(官方 ctx.llm 通道)+ 轻量 loop 骨架 + 宿主工具表注入
+# 核心逻辑在 dist/index.js(bundle 自包含);codex 风格由 dsh-busyloop-codexstyle 提供
