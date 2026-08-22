@@ -8,6 +8,9 @@
  *
  * 密钥来源:~/.dsh/.credentials.yaml 的 DEEPSEEK_API_KEY(脚本内注入,不打印)。
  * 覆盖:纯对话 1 轮 + 多轮工具调用(get_weather),验证 usage/cacheReadTokens。
+ * Ark 模式:设置环境变量 DSH_E2E_ARK=1 时改用 Volcano Ark plan API
+ *   (https://ark.cn-beijing.volces.com/api/plan/v3)+ ARK_API_KEY——
+ *   一次性任务可以整体丢给 ark key 跑,与官方直连通道分离。
  */
 import { readFileSync } from 'node:fs'
 import yaml from 'js-yaml'
@@ -19,23 +22,28 @@ import { hostLlm, runBusyLoop } from '../dist/index.js'
 const creds = yaml.load(
   readFileSync(process.env.USERPROFILE + '\\.dsh\\.credentials.yaml', 'utf8'),
 )
-const key = creds.refs?.DEEPSEEK_API_KEY?.value ?? creds.refs?.DEEPSEEK_API_KEY ?? creds.DEEPSEEK_API_KEY
+const useArk = process.env.DSH_E2E_ARK === '1'
+const KEY_ENV = useArk ? 'ARK_API_KEY' : 'DEEPSEEK_API_KEY'
+// Ark plan API only serves deepseek-v4-flash (agent-plan models); the direct
+// DeepSeek API serves deepseek-chat.
+const MODEL = useArk ? 'deepseek-v4-flash' : 'deepseek-chat'
+const key = creds.refs?.[KEY_ENV]?.value ?? creds.refs?.[KEY_ENV] ?? creds[KEY_ENV]
 if (!key) {
-  console.error('NO KEY: ~/.dsh/.credentials.yaml missing DEEPSEEK_API_KEY')
+  console.error(`NO KEY: ~/.dsh/.credentials.yaml missing ${KEY_ENV}`)
   process.exit(1)
 }
-process.env.DEEPSEEK_API_KEY = key
+process.env[KEY_ENV] = key
 
 const ctx = new Context()
 const runtime = new LlmRuntime(ctx)
 const adapter = new DeepSeekAdapter({
   options: () => ({
-    baseURL: 'https://api.deepseek.com',
-    apiKeyEnv: 'DEEPSEEK_API_KEY',
+    baseURL: useArk ? 'https://ark.cn-beijing.volces.com/api/plan/v3' : 'https://api.deepseek.com',
+    apiKeyEnv: KEY_ENV,
     defaults: {},
     maxTokens: 2048,
     defaultContextWindow: 65536,
-    models: [{ id: 'deepseek-chat' }],
+    models: [{ id: MODEL }],
     streamIdleTimeoutMs: 120000,
     maxRequestFilesBytes: 0,
     maxInlineRequestImageBytes: 0,
@@ -45,7 +53,7 @@ const adapter = new DeepSeekAdapter({
     imageOffloadCountQuantum: 1,
     filesApiTimeoutMs: 10000,
   }),
-  resolveApiKey: async () => process.env.DEEPSEEK_API_KEY,
+  resolveApiKey: async () => process.env[KEY_ENV],
   resolveUserId: () => 'dsh-busyloop-e2e',
 })
 ctx.llm.registerAdapter(['deepseek'], adapter)
@@ -54,7 +62,7 @@ const llm = hostLlm(ctx.llm)
 // 1) plain chat
 const chat = await runBusyLoop(llm, {
   provider: 'deepseek',
-  model: 'deepseek-chat',
+  model: MODEL,
   prompt: 'Answer in one short sentence: what is 2+2?',
   maxTokens: 200,
 })
@@ -70,7 +78,7 @@ const weatherTool = {
 }
 const tooled = await runBusyLoop(llm, {
   provider: 'deepseek',
-  model: 'deepseek-chat',
+  model: MODEL,
   prompt: 'What is the weather in Tokyo? Use the get_weather tool, then answer with one sentence.',
   tools: [weatherTool],
   maxTokens: 500,
