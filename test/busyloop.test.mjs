@@ -231,7 +231,7 @@ test('apply registers the busyloop_run agent tool when ctx.tools present', () =>
   const registered = []
   apply({ tools: { register: (def) => registered.push(def) } })
   const names = registered.map((d) => d.name)
-  assert.deepEqual(names, ['busyloop_run'])
+  assert.deepEqual(names, ['busyloop_run','busyloop_key_add','busyloop_key_list','busyloop_key_remove','busyloop_key_use'])
 })
 
 test('apply tolerates host without tool registry', () => {
