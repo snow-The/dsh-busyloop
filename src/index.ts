@@ -252,7 +252,13 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
         // runtime even when the type is optional — guard the host-llm probe.
         let llmCtx: Parameters<typeof hostLlm>[0] | undefined
         try {
-          llmCtx = (ctx as { llm?: Parameters<typeof hostLlm>[0] }).llm
+          const maybe = (ctx as { llm?: Parameters<typeof hostLlm>[0] }).llm
+          // cordis proxy: bare property access does NOT throw — only touching
+          // the proxy does. Probe the method so a missing service degrades to
+          // undefined instead of blowing up later.
+          if (maybe && typeof (maybe as { listProviders?: unknown }).listProviders === 'function') {
+            llmCtx = maybe
+          }
         } catch {
           llmCtx = undefined // host without the llm service: custom channels still work
         }

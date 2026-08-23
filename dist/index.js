@@ -2479,7 +2479,10 @@ function registerBusyloopRun(ctx) {
         const channelKey = String(args.channel ?? "ark");
         let llmCtx;
         try {
-          llmCtx = ctx.llm;
+          const maybe = ctx.llm;
+          if (maybe && typeof maybe.listProviders === "function") {
+            llmCtx = maybe;
+          }
         } catch {
           llmCtx = void 0;
         }
