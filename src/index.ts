@@ -53,6 +53,8 @@ interface Channel {
   keyEnv: string
   /** Optional per-channel output budget. Thinking models (kimi-k3, o-series, gpt-5.6-*) spend tokens in reasoning_content first — raise this when output comes back empty. Default 2048. */
   maxTokens?: number
+  /** Optional context window in tokens (e.g. 262144 for 256K, 1000000 for 1M). When set, busyloop_run auto-budgets: truncates oversized prompts and caps maxTokens so every call stays inside the window (and its pricing tier). Provider-registered info takes precedence over this fallback; absent = unlimited. */
+  contextWindow?: number
 }
 
 const CHANNELS: Record<'ark' | 'direct', Channel> = {
@@ -85,6 +87,7 @@ function loadCustomChannels(): Record<string, Channel> {
           model: v.model,
           keyEnv: v.keyEnv,
           maxTokens: typeof v.maxTokens === 'number' && v.maxTokens > 0 ? v.maxTokens : undefined,
+          contextWindow: typeof v.contextWindow === 'number' && v.contextWindow > 0 ? v.contextWindow : undefined,
         }
       }
     }
@@ -111,7 +114,10 @@ function resolveChannel(channelKey: string, ctxLlm?: Parameters<typeof hostLlm>[
         const baseURL = String(anyP.baseURL ?? '')
         const model = String(anyP.model ?? (models[0] as { id?: string } | string | undefined) ?? '')
         const keyEnv = String(anyP.keyEnv ?? anyP.apiKeyEnv ?? '')
-        if (baseURL && model && keyEnv) return { baseURL, model, keyEnv }
+        const win = Number(anyP.contextWindow) > 0 ? Number(anyP.contextWindow) : undefined
+        const firstModel = Array.isArray(anyP.models) ? anyP.models[0] as Record<string, unknown> | undefined : undefined
+        const modelWin = firstModel && Number((firstModel as Record<string, unknown>).contextWindow) > 0 ? Number((firstModel as Record<string, unknown>).contextWindow) : undefined
+        if (baseURL && model && keyEnv) return { baseURL, model, keyEnv, contextWindow: win ?? modelWin }
       }
     } catch {
       /* provider probe failed — fall through to the explicit error */
@@ -280,14 +286,42 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
         process.env[channel.keyEnv] = key
         const keyUsed = resolved.alias ? `${resolved.alias}(${resolved.masked})` : resolved.masked ?? 'unknown'
 
+        // Adaptive window budget (0.1.24): provider contextWindow > channel fallback > unlimited.
+        // Keeps every call inside the model's window (and its pricing tier) without hard-coding tiers.
+        const rawPrompt = String(args.prompt)
+        const sysText = resolveSystem(args.system, args.discipline)
+        let prompt = rawPrompt
+        let maxTokens = args.maxTokens ? Number(args.maxTokens) : undefined
+        let budgetNote: string | undefined
+        const win = channel.contextWindow
+        if (win && win > 0) {
+          const inputEst = Math.ceil((rawPrompt.length + sysText.length) / 3)
+          if (inputEst > win * 0.85) {
+            const keep = Math.floor(rawPrompt.length * 0.85)
+            const head = Math.floor(keep * 0.5)
+            prompt =
+              rawPrompt.slice(0, head) +
+              '\n\n...[truncated by busyloop window budget]...\n\n' +
+              rawPrompt.slice(rawPrompt.length - (keep - head))
+            budgetNote = `prompt truncated: ~${inputEst} tokens estimated vs ${win} window`
+          }
+          const requested = maxTokens ?? channel.maxTokens ?? 2048
+          const headroom = win - Math.ceil(inputEst * 1.2) - 1024
+          if (requested > headroom) {
+            const capped = Math.max(256, headroom)
+            maxTokens = Math.min(requested, capped)
+            budgetNote = budgetNote ? `${budgetNote}; ` : ''
+            budgetNote += `maxTokens capped ${requested} -> ${maxTokens} (window ${win})`
+          }
+        }
         try {
           const result = await runBusyLoop(llm, {
             provider: 'deepseek',
             model: channel.model,
-            prompt: String(args.prompt),
-            system: resolveSystem(args.system, args.discipline),
+            prompt,
+            system: sysText,
             maxTurns: args.maxTurns ? Number(args.maxTurns) : undefined,
-            maxTokens: args.maxTokens ? Number(args.maxTokens) : undefined,
+            maxTokens,
             reasoningEffort: args.reasoningEffort ? String(args.reasoningEffort) : undefined,
             signal: exec?.signal,
             sessionId: 'busyloop-tools',
@@ -307,6 +341,7 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
             finish: result.finish,
             usage: result.usage ?? null,
             ...(note ? { outputNote: note } : {}),
+            ...(budgetNote ? { budgetNote } : {}),
           })
         } catch (err) {
           return JSON.stringify({
