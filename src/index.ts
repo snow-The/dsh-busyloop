@@ -237,7 +237,7 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
         },
         reasoningEffort: {
           type: 'string',
-          enum: ['max', 'high', 'medium', 'low', 'none'],
+          enum: ['max', 'xhigh', 'high', 'medium', 'low', 'minimal', 'none'],
           description: 'Reasoning effort for this run (default: provider/channel default). Passed to the upstream API as reasoning_effort so the chat menu choice actually applies.',
         },
       },
