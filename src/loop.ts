@@ -56,6 +56,7 @@ export async function runBusyLoop(llm: HostLlm, opts: BusyLoopOptions): Promise<
         description: t.description,
         parameters: t.parameters,
       })),
+      reasoningEffort: opts.reasoningEffort as GenerateOptions['reasoningEffort'],
       temperature: opts.temperature,
       maxTokens: opts.maxTokens,
       signal: opts.signal,

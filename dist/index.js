@@ -2245,6 +2245,7 @@ async function runBusyLoop(llm, opts) {
         description: t.description,
         parameters: t.parameters
       })),
+      reasoningEffort: opts.reasoningEffort,
       temperature: opts.temperature,
       maxTokens: opts.maxTokens,
       signal: opts.signal,
@@ -2462,6 +2463,11 @@ function registerBusyloopRun(ctx) {
         maxTokens: {
           type: "number",
           description: "Max output tokens per generation (default 2048)."
+        },
+        reasoningEffort: {
+          type: "string",
+          enum: ["max", "high", "medium", "low", "none"],
+          description: "Reasoning effort for this run (default: provider/channel default). Passed to the upstream API as reasoning_effort so the chat menu choice actually applies."
         }
       },
       output: {
@@ -2502,6 +2508,7 @@ function registerBusyloopRun(ctx) {
             system: resolveSystem(args.system, args.discipline),
             maxTurns: args.maxTurns ? Number(args.maxTurns) : void 0,
             maxTokens: args.maxTokens ? Number(args.maxTokens) : void 0,
+            reasoningEffort: args.reasoningEffort ? String(args.reasoningEffort) : void 0,
             signal: exec?.signal,
             sessionId: "busyloop-tools"
           });

@@ -21,6 +21,8 @@ export interface BusyLoopOptions {
     tools?: LoopTool[];
     /** Max turns before forced stop (default 8). */
     maxTurns?: number;
+    /** Reasoning effort id (max/high/medium/low/none) passed to the provider. */
+    reasoningEffort?: string;
     temperature?: number;
     maxTokens?: number;
     signal?: AbortSignal;

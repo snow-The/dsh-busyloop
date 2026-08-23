@@ -235,6 +235,11 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
           type: 'number',
           description: 'Max output tokens per generation (default 2048).',
         },
+        reasoningEffort: {
+          type: 'string',
+          enum: ['max', 'high', 'medium', 'low', 'none'],
+          description: 'Reasoning effort for this run (default: provider/channel default). Passed to the upstream API as reasoning_effort so the chat menu choice actually applies.',
+        },
       },
       output: {
         schema: { type: 'string' },
@@ -277,6 +282,7 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
             system: resolveSystem(args.system, args.discipline),
             maxTurns: args.maxTurns ? Number(args.maxTurns) : undefined,
             maxTokens: args.maxTokens ? Number(args.maxTokens) : undefined,
+            reasoningEffort: args.reasoningEffort ? String(args.reasoningEffort) : undefined,
             signal: exec?.signal,
             sessionId: 'busyloop-tools',
           })
