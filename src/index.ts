@@ -124,7 +124,7 @@ function resolveChannel(channelKey: string, ctxLlm?: Parameters<typeof hostLlm>[
 }
 
 function credentialsPath(): string {
-  return `${process.env.USERPROFILE ?? ''}\\.dsh\\.credentials.yaml`
+  return `${process.env.USERPROFILE ?? process.env.HOME ?? ''}\\.dsh\\.credentials.yaml`
 }
 
 function loadKey(keyEnv: string): string | undefined {
