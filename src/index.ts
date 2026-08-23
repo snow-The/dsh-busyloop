@@ -75,7 +75,7 @@ const CHANNELS: Record<'ark' | 'direct', Channel> = {
  */
 function loadCustomChannels(): Record<string, Channel> {
   try {
-    const file = process.env.DSH_BUSYLOOP_CHANNELS ?? join(process.env.USERPROFILE ?? homedir(), '.dsh', 'busyloop-channels.json')
+    const file = process.env.DSH_BUSYLOOP_CHANNELS ?? join(homedir(), '.dsh', 'busyloop-channels.json')
     const raw = JSON.parse(readFileSync(file, 'utf8')) as Record<string, Partial<Channel>>
     const out: Record<string, Channel> = {}
     for (const [k, v] of Object.entries(raw ?? {})) {

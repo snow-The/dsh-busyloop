@@ -2323,7 +2323,7 @@ var CHANNELS = {
 };
 function loadCustomChannels() {
   try {
-    const file = process.env.DSH_BUSYLOOP_CHANNELS ?? join2(process.env.USERPROFILE ?? homedir2(), ".dsh", "busyloop-channels.json");
+    const file = process.env.DSH_BUSYLOOP_CHANNELS ?? join2(homedir2(), ".dsh", "busyloop-channels.json");
     const raw2 = JSON.parse(readFileSync2(file, "utf8"));
     const out = {};
     for (const [k, v] of Object.entries(raw2 ?? {})) {
