@@ -2368,7 +2368,7 @@ function resolveChannel(channelKey, ctxLlm) {
   );
 }
 function credentialsPath() {
-  return `${process.env.USERPROFILE ?? process.env.HOME ?? ""}\\.dsh\\.credentials.yaml`;
+  return `${join2(homedir2(), ".dsh", ".credentials.yaml")}`;
 }
 function loadKey(keyEnv) {
   if (process.env[keyEnv]) return process.env[keyEnv];
