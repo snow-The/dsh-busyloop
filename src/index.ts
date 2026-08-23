@@ -51,6 +51,8 @@ interface Channel {
   baseURL: string
   model: string
   keyEnv: string
+  /** Optional per-channel output budget. Thinking models (kimi-k3, o-series, gpt-5.6-*) spend tokens in reasoning_content first — raise this when output comes back empty. Default 2048. */
+  maxTokens?: number
 }
 
 const CHANNELS: Record<'ark' | 'direct', Channel> = {
@@ -78,7 +80,12 @@ function loadCustomChannels(): Record<string, Channel> {
     const out: Record<string, Channel> = {}
     for (const [k, v] of Object.entries(raw ?? {})) {
       if (v && typeof v.baseURL === 'string' && typeof v.model === 'string' && typeof v.keyEnv === 'string') {
-        out[k] = { baseURL: v.baseURL, model: v.model, keyEnv: v.keyEnv }
+        out[k] = {
+          baseURL: v.baseURL,
+          model: v.model,
+          keyEnv: v.keyEnv,
+          maxTokens: typeof v.maxTokens === 'number' && v.maxTokens > 0 ? v.maxTokens : undefined,
+        }
       }
     }
     return out
@@ -147,7 +154,7 @@ function getRuntime(channelKey: string, ctxLlm?: Parameters<typeof hostLlm>[0]):
         baseURL: channel.baseURL,
         apiKeyEnv: channel.keyEnv,
         defaults: {},
-        maxTokens: 2048,
+        maxTokens: channel.maxTokens ?? 2048,
         defaultContextWindow: 65536,
         models: [{ id: channel.model }],
         streamIdleTimeoutMs: 120000,
@@ -273,6 +280,10 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
             signal: exec?.signal,
             sessionId: 'busyloop-tools',
           })
+          const note =
+            !result.output && result.finish === 'length'
+              ? `empty output: maxTokens exhausted before any content — thinking models spend tokens on reasoning_content first; raise maxTokens (current: ${args.maxTokens ?? channel.maxTokens ?? 2048}) or switch to a non-thinking model`
+              : undefined
           return JSON.stringify({
             ok: true,
             channel: channelKey,
@@ -283,6 +294,7 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
             toolCalls: result.toolCalls,
             finish: result.finish,
             usage: result.usage ?? null,
+            ...(note ? { outputNote: note } : {}),
           })
         } catch (err) {
           return JSON.stringify({

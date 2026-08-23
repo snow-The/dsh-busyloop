@@ -2328,7 +2328,12 @@ function loadCustomChannels() {
     const out = {};
     for (const [k, v] of Object.entries(raw2 ?? {})) {
       if (v && typeof v.baseURL === "string" && typeof v.model === "string" && typeof v.keyEnv === "string") {
-        out[k] = { baseURL: v.baseURL, model: v.model, keyEnv: v.keyEnv };
+        out[k] = {
+          baseURL: v.baseURL,
+          model: v.model,
+          keyEnv: v.keyEnv,
+          maxTokens: typeof v.maxTokens === "number" && v.maxTokens > 0 ? v.maxTokens : void 0
+        };
       }
     }
     return out;
@@ -2386,7 +2391,7 @@ function getRuntime(channelKey, ctxLlm) {
         baseURL: channel.baseURL,
         apiKeyEnv: channel.keyEnv,
         defaults: {},
-        maxTokens: 2048,
+        maxTokens: channel.maxTokens ?? 2048,
         defaultContextWindow: 65536,
         models: [{ id: channel.model }],
         streamIdleTimeoutMs: 12e4,
@@ -2500,6 +2505,7 @@ function registerBusyloopRun(ctx) {
             signal: exec?.signal,
             sessionId: "busyloop-tools"
           });
+          const note = !result.output && result.finish === "length" ? `empty output: maxTokens exhausted before any content \u2014 thinking models spend tokens on reasoning_content first; raise maxTokens (current: ${args.maxTokens ?? channel.maxTokens ?? 2048}) or switch to a non-thinking model` : void 0;
           return JSON.stringify({
             ok: true,
             channel: channelKey,
@@ -2509,7 +2515,8 @@ function registerBusyloopRun(ctx) {
             turns: result.turns,
             toolCalls: result.toolCalls,
             finish: result.finish,
-            usage: result.usage ?? null
+            usage: result.usage ?? null,
+            ...note ? { outputNote: note } : {}
           });
         } catch (err) {
           return JSON.stringify({
