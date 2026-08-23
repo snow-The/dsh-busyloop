@@ -17,6 +17,8 @@ export interface KeyEntry {
   alias: string
   key: string
   scope: KeyScope
+  /** Optional channel this key is bound to (ark/direct/custom). Keys without a channel match any. */
+  channel?: string
   createdAt: string
 }
 
@@ -50,22 +52,23 @@ export function maskKey(key: string): string {
 export function listKeys(): Array<Omit<KeyEntry, 'key'> & { masked: string; active: boolean }> {
   const entries = readStore()
   const active = readActiveAlias()
-  return entries.map((e) => ({ id: e.id, alias: e.alias, scope: e.scope, createdAt: e.createdAt, masked: maskKey(e.key), active: e.alias === active }))
+  return entries.map((e) => ({ id: e.id, alias: e.alias, scope: e.scope, channel: e.channel, createdAt: e.createdAt, masked: maskKey(e.key), active: e.alias === active }))
 }
 
-export function addKey(alias: string, key: string, scope: KeyScope): KeyEntry {
+export function addKey(alias: string, key: string, scope: KeyScope, channel?: string): KeyEntry {
   const cleanAlias = alias.trim()
   const cleanKey = key.trim()
+  const cleanChannel = channel?.trim() || undefined
   if (!cleanAlias) throw new Error('alias must not be empty')
   if (!cleanKey) throw new Error('key must not be empty')
   if (cleanKey.length < 8) throw new Error('key too short (min 8 chars)')
   const entries = readStore()
   if (entries.some((e) => e.alias === cleanAlias)) {
-    const updated = entries.map((e) => (e.alias === cleanAlias ? { ...e, key: cleanKey, scope } : e))
+    const updated = entries.map((e) => (e.alias === cleanAlias ? { ...e, key: cleanKey, scope, channel: cleanChannel } : e))
     writeStore(updated)
     return updated.find((e) => e.alias === cleanAlias) as KeyEntry
   }
-  const entry: KeyEntry = { id: randomUUID(), alias: cleanAlias, key: cleanKey, scope, createdAt: new Date().toISOString() }
+  const entry: KeyEntry = { id: randomUUID(), alias: cleanAlias, key: cleanKey, scope, channel: cleanChannel, createdAt: new Date().toISOString() }
   writeStore([...entries, entry])
   return entry
 }
@@ -121,11 +124,16 @@ export function activeKeyInfo(): { alias?: string; masked?: string } {
 export function resolveEffectiveKey(
   loadEnvKey: (keyEnv: string) => string | undefined,
   keyEnv: string,
+  channel?: string,
 ): { key?: string; alias?: string; masked?: string; source: 'session' | 'global' } {
   const active = readActiveAlias()
   if (active) {
     const entry = readStore().find((e) => e.alias === active)
-    if (entry) return { key: entry.key, alias: entry.alias, masked: maskKey(entry.key), source: 'session' }
+    // A session key bound to another channel must NOT leak into this call:
+    // it would hit the wrong endpoint with the wrong key (401 / misbill).
+    if (entry && (!entry.channel || entry.channel === channel)) {
+      return { key: entry.key, alias: entry.alias, masked: maskKey(entry.key), source: 'session' }
+    }
   }
   const envKey = loadEnvKey(keyEnv)
   if (envKey) return { key: envKey, masked: maskKey(envKey), source: 'global' }

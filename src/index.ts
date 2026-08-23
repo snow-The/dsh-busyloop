@@ -1,4 +1,6 @@
 import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import { DeepSeekAdapter } from '@deepseek-ai/dsh-llm-deepseek'
@@ -64,6 +66,56 @@ const CHANNELS: Record<'ark' | 'direct', Channel> = {
   },
 }
 
+/**
+ * P3: user-defined channels — ~/.dsh/busyloop-channels.json
+ *   { "momotale": { "baseURL": "https://router.momotale.com/v1", "model": "kimi-k3", "keyEnv": "MOMOTALE_API_KEY" } }
+ * No code change needed to add a new provider.
+ */
+function loadCustomChannels(): Record<string, Channel> {
+  try {
+    const file = process.env.DSH_BUSYLOOP_CHANNELS ?? join(process.env.USERPROFILE ?? homedir(), '.dsh', 'busyloop-channels.json')
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as Record<string, Partial<Channel>>
+    const out: Record<string, Channel> = {}
+    for (const [k, v] of Object.entries(raw ?? {})) {
+      if (v && typeof v.baseURL === 'string' && typeof v.model === 'string' && typeof v.keyEnv === 'string') {
+        out[k] = { baseURL: v.baseURL, model: v.model, keyEnv: v.keyEnv }
+      }
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** P1: resolve a channel by name — builtin → custom file → (guarded) host-registered providers. Throws with the available list otherwise. */
+function resolveChannel(channelKey: string, ctxLlm?: Parameters<typeof hostLlm>[0]): Channel {
+  const builtin = CHANNELS[channelKey as 'ark' | 'direct']
+  if (builtin) return builtin
+  const custom = loadCustomChannels()[channelKey]
+  if (custom) return custom
+  if (ctxLlm) {
+    try {
+      const providers = hostLlm(ctxLlm).listProviders() as unknown[]
+      for (const p of providers) {
+        const id = (p as { id?: string })?.id ?? String(p)
+        if (id !== channelKey) continue
+        const anyP = p as Record<string, unknown>
+        const models = Array.isArray(anyP.models) ? anyP.models : []
+        const baseURL = String(anyP.baseURL ?? '')
+        const model = String(anyP.model ?? (models[0] as { id?: string } | string | undefined) ?? '')
+        const keyEnv = String(anyP.keyEnv ?? anyP.apiKeyEnv ?? '')
+        if (baseURL && model && keyEnv) return { baseURL, model, keyEnv }
+      }
+    } catch {
+      /* provider probe failed — fall through to the explicit error */
+    }
+  }
+  const available = Object.keys(CHANNELS).concat(Object.keys(loadCustomChannels()))
+  throw new Error(
+    `unknown channel "${channelKey}". Available channels: ${available.join(', ')} (custom channels: ~/.dsh/busyloop-channels.json)`
+  )
+}
+
 function credentialsPath(): string {
   return `${process.env.USERPROFILE ?? ''}\\.dsh\\.credentials.yaml`
 }
@@ -81,10 +133,10 @@ function loadKey(keyEnv: string): string | undefined {
 }
 
 // One shared runtime per channel, built on first use.
-const runtimes = new Map<'ark' | 'direct', { llm: HostLlm }>()
+const runtimes = new Map<string, { llm: HostLlm }>()
 
-function getRuntime(channelKey: keyof typeof CHANNELS): { llm: HostLlm; channel: Channel } {
-  const channel = CHANNELS[channelKey]
+function getRuntime(channelKey: string, ctxLlm?: Parameters<typeof hostLlm>[0]): { llm: HostLlm; channel: Channel } {
+  const channel = resolveChannel(channelKey, ctxLlm)
   let built = runtimes.get(channelKey)
   if (!built) {
     const ctx = new Context()
@@ -144,7 +196,7 @@ function resolveSystem(custom: unknown, discipline: unknown): string | undefined
   return DISCIPLINE_SYSTEM
 }
 
-function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknown } }): void {
+function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknown }; llm?: Parameters<typeof hostLlm>[0] }): void {
   ctx.tools?.register(
     defineTool({
       name: 'busyloop_run',
@@ -158,7 +210,7 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
         },
         channel: {
           type: 'string',
-          description: 'Which LLM channel to use. ark (default) = Volcano Ark plan API, deepseek-v4-flash, ARK_API_KEY; direct = api.deepseek.com, deepseek-chat, DEEPSEEK_API_KEY.',
+          description: 'Which LLM channel to use: ark (default) = Volcano Ark plan API (deepseek-v4-flash, ARK_API_KEY); direct = api.deepseek.com (deepseek-chat, DEEPSEEK_API_KEY); or any channel defined in ~/.dsh/busyloop-channels.json. Unknown channels error out listing the available ones.',
         },
         system: {
           type: 'string',
@@ -183,14 +235,20 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
       },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       async execute(args: any, exec: any) {
-        const channelKey: 'ark' | 'direct' = args.channel === 'direct' ? 'direct' : 'ark'
-        const { llm, channel } = getRuntime(channelKey)
-        const resolved = keyStore.resolveEffectiveKey(loadKey, channel.keyEnv)
+        const channelKey = String(args.channel ?? 'ark')
+        let channel: Channel
+        try {
+          channel = resolveChannel(channelKey, ctx.llm)
+        } catch (err) {
+          return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) })
+        }
+        const { llm } = getRuntime(channelKey, ctx.llm)
+        const resolved = keyStore.resolveEffectiveKey(loadKey, channel.keyEnv, channelKey)
         const key = resolved.key
         if (!key) {
           return JSON.stringify({
             ok: false,
-            error: `No ${channel.keyEnv} found (checked session keys, env and ${credentialsPath()})`,
+            error: `No ${channel.keyEnv} found for channel "${channelKey}" (checked session keys, env and ${credentialsPath()})`,
           })
         }
         process.env[channel.keyEnv] = key
@@ -241,13 +299,14 @@ function registerKeyTools(ctx: { tools?: { register: (def: unknown) => unknown }
       alias: { type: 'string', description: 'Short label, e.g. alice-ark', required: true },
       key: { type: 'string', description: 'The API key (min 8 chars)', required: true },
       scope: { type: 'string', description: 'chat (default) or subagent' },
+      channel: { type: 'string', description: 'Optional channel this key is bound to (ark/direct/custom name). When set, busyloop_run only uses this key for that channel — wrong-channel keys never leak into a call.' },
     },
     output: { schema: { type: 'string' }, render: (_a: unknown, v: string) => [{ type: 'text', text: v }] },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     async execute(args: any) {
       try {
         const scope = args.scope === 'subagent' ? 'subagent' : 'chat'
-        const entry = keyStore.addKey(String(args.alias), String(args.key), scope)
+        const entry = keyStore.addKey(String(args.alias), String(args.key), scope, args.channel ? String(args.channel) : undefined)
         return JSON.stringify({ ok: true, alias: entry.alias, scope: entry.scope, masked: keyStore.maskKey(entry.key) })
       } catch (err) {
         return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) })

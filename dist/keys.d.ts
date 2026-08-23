@@ -4,6 +4,8 @@ export interface KeyEntry {
     alias: string;
     key: string;
     scope: KeyScope;
+    /** Optional channel this key is bound to (ark/direct/custom). Keys without a channel match any. */
+    channel?: string;
     createdAt: string;
 }
 /** sk-abc123... -> sk-****c123 (前 4 后 4,绝不回显完整 key) */
@@ -12,7 +14,7 @@ export declare function listKeys(): Array<Omit<KeyEntry, 'key'> & {
     masked: string;
     active: boolean;
 }>;
-export declare function addKey(alias: string, key: string, scope: KeyScope): KeyEntry;
+export declare function addKey(alias: string, key: string, scope: KeyScope, channel?: string): KeyEntry;
 export declare function removeKey(alias: string): boolean;
 /** 聊天内选择:把某个 chat-scope key 设为当前会话生效(仅影响后续 busyloop_run)。 */
 export declare function useKey(alias: string): {
@@ -29,7 +31,7 @@ export declare function activeKeyInfo(): {
  * 1) 当前会话选中的 chat-scope key(active alias)
  * 2) 回退:全局 env / credentials(由调用方提供 loadEnvKey)
  */
-export declare function resolveEffectiveKey(loadEnvKey: (keyEnv: string) => string | undefined, keyEnv: string): {
+export declare function resolveEffectiveKey(loadEnvKey: (keyEnv: string) => string | undefined, keyEnv: string, channel?: string): {
     key?: string;
     alias?: string;
     masked?: string;
