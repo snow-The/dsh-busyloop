@@ -2333,7 +2333,8 @@ function loadCustomChannels() {
           baseURL: v.baseURL,
           model: v.model,
           keyEnv: v.keyEnv,
-          maxTokens: typeof v.maxTokens === "number" && v.maxTokens > 0 ? v.maxTokens : void 0
+          maxTokens: typeof v.maxTokens === "number" && v.maxTokens > 0 ? v.maxTokens : void 0,
+          contextWindow: typeof v.contextWindow === "number" && v.contextWindow > 0 ? v.contextWindow : void 0
         };
       }
     }
@@ -2358,7 +2359,10 @@ function resolveChannel(channelKey, ctxLlm) {
         const baseURL = String(anyP.baseURL ?? "");
         const model = String(anyP.model ?? models[0] ?? "");
         const keyEnv = String(anyP.keyEnv ?? anyP.apiKeyEnv ?? "");
-        if (baseURL && model && keyEnv) return { baseURL, model, keyEnv };
+        const win = Number(anyP.contextWindow) > 0 ? Number(anyP.contextWindow) : void 0;
+        const firstModel = Array.isArray(anyP.models) ? anyP.models[0] : void 0;
+        const modelWin = firstModel && Number(firstModel.contextWindow) > 0 ? Number(firstModel.contextWindow) : void 0;
+        if (baseURL && model && keyEnv) return { baseURL, model, keyEnv, contextWindow: win ?? modelWin };
       }
     } catch {
     }
@@ -2503,14 +2507,37 @@ function registerBusyloopRun(ctx) {
         }
         process.env[channel.keyEnv] = key;
         const keyUsed = resolved.alias ? `${resolved.alias}(${resolved.masked})` : resolved.masked ?? "unknown";
+        const rawPrompt = String(args.prompt);
+        const sysText = resolveSystem(args.system, args.discipline);
+        let prompt = rawPrompt;
+        let maxTokens = args.maxTokens ? Number(args.maxTokens) : void 0;
+        let budgetNote;
+        const win = channel.contextWindow;
+        if (win && win > 0) {
+          const inputEst = Math.ceil((rawPrompt.length + (sysText ?? "").length) / 3);
+          if (inputEst > win * 0.85) {
+            const keep = Math.floor(rawPrompt.length * 0.85);
+            const head = Math.floor(keep * 0.5);
+            prompt = rawPrompt.slice(0, head) + "\n\n...[truncated by busyloop window budget]...\n\n" + rawPrompt.slice(rawPrompt.length - (keep - head));
+            budgetNote = `prompt truncated: ~${inputEst} tokens estimated vs ${win} window`;
+          }
+          const requested = maxTokens ?? channel.maxTokens ?? 2048;
+          const headroom = win - Math.ceil(inputEst * 1.2) - 1024;
+          if (requested > headroom) {
+            const capped = Math.max(256, headroom);
+            maxTokens = Math.min(requested, capped);
+            budgetNote = budgetNote ? `${budgetNote}; ` : "";
+            budgetNote += `maxTokens capped ${requested} -> ${maxTokens} (window ${win})`;
+          }
+        }
         try {
           const result = await runBusyLoop(llm, {
             provider: "deepseek",
             model: channel.model,
-            prompt: String(args.prompt),
-            system: resolveSystem(args.system, args.discipline),
+            prompt,
+            system: sysText,
             maxTurns: args.maxTurns ? Number(args.maxTurns) : void 0,
-            maxTokens: args.maxTokens ? Number(args.maxTokens) : void 0,
+            maxTokens,
             reasoningEffort: args.reasoningEffort ? String(args.reasoningEffort) : void 0,
             signal: exec?.signal,
             sessionId: "busyloop-tools"
@@ -2526,7 +2553,8 @@ function registerBusyloopRun(ctx) {
             toolCalls: result.toolCalls,
             finish: result.finish,
             usage: result.usage ?? null,
-            ...note ? { outputNote: note } : {}
+            ...note ? { outputNote: note } : {},
+            ...budgetNote ? { budgetNote } : {}
           });
         } catch (err) {
           return JSON.stringify({

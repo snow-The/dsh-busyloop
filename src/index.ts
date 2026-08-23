@@ -295,7 +295,7 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
         let budgetNote: string | undefined
         const win = channel.contextWindow
         if (win && win > 0) {
-          const inputEst = Math.ceil((rawPrompt.length + sysText.length) / 3)
+          const inputEst = Math.ceil((rawPrompt.length + (sysText ?? '').length) / 3)
           if (inputEst > win * 0.85) {
             const keep = Math.floor(rawPrompt.length * 0.85)
             const head = Math.floor(keep * 0.5)
