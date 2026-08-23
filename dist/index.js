@@ -2466,13 +2466,19 @@ function registerBusyloopRun(ctx) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       async execute(args, exec) {
         const channelKey = String(args.channel ?? "ark");
+        let llmCtx;
+        try {
+          llmCtx = ctx.llm;
+        } catch {
+          llmCtx = void 0;
+        }
         let channel;
         try {
-          channel = resolveChannel(channelKey, ctx.llm);
+          channel = resolveChannel(channelKey, llmCtx);
         } catch (err) {
           return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) });
         }
-        const { llm } = getRuntime(channelKey, ctx.llm);
+        const { llm } = getRuntime(channelKey, llmCtx);
         const resolved = resolveEffectiveKey(loadKey, channel.keyEnv, channelKey);
         const key = resolved.key;
         if (!key) {

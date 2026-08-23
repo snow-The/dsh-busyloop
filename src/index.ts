@@ -236,13 +236,21 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       async execute(args: any, exec: any) {
         const channelKey = String(args.channel ?? 'ark')
+        // cordis proxy rule: reading an undeclared service property THROWS at
+        // runtime even when the type is optional — guard the host-llm probe.
+        let llmCtx: Parameters<typeof hostLlm>[0] | undefined
+        try {
+          llmCtx = (ctx as { llm?: Parameters<typeof hostLlm>[0] }).llm
+        } catch {
+          llmCtx = undefined // host without the llm service: custom channels still work
+        }
         let channel: Channel
         try {
-          channel = resolveChannel(channelKey, ctx.llm)
+          channel = resolveChannel(channelKey, llmCtx)
         } catch (err) {
           return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) })
         }
-        const { llm } = getRuntime(channelKey, ctx.llm)
+        const { llm } = getRuntime(channelKey, llmCtx)
         const resolved = keyStore.resolveEffectiveKey(loadKey, channel.keyEnv, channelKey)
         const key = resolved.key
         if (!key) {
