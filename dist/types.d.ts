@@ -23,6 +23,14 @@ export interface BusyLoopOptions {
     maxTurns?: number;
     /** Reasoning effort id (max/high/medium/low/none) passed to the provider. */
     reasoningEffort?: string;
+    /**
+     * Throttle: wait this many ms before EVERY LLM generation inside the loop
+     * (per-turn pacing, not a total timeout). Use to stay under per-key rate
+     * limits — one router key can serve models with different limits, so this
+     * is a per-call knob: the caller decides on the spot, never hard-coded.
+     * Default 0 (no delay). Channel config supplies the fallback when omitted.
+     */
+    delayMs?: number;
     temperature?: number;
     maxTokens?: number;
     signal?: AbortSignal;

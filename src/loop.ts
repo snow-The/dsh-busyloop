@@ -16,6 +16,11 @@ function toolResultMessage(toolCallId: string, text: string, isError: boolean): 
   } as Message
 }
 
+function sleep(ms: number): Promise<void> {
+  if (!(ms > 0)) return Promise.resolve()
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 function stringifyResult(v: unknown): string {
   if (typeof v === 'string') return v
   try {
@@ -46,6 +51,10 @@ export async function runBusyLoop(llm: HostLlm, opts: BusyLoopOptions): Promise<
 
   for (let i = 0; i < maxTurns; i++) {
     turns = i + 1
+    // Per-call throttle knob (0.1.26): wait before EVERY generation so the
+    // caller can pace requests on the spot — one router key may back models
+    // with different rate limits, so this is a parameter, never a constant.
+    await sleep(opts.delayMs ?? 0)
     const gen: GenerateOptions = {
       provider: opts.provider,
       model: opts.model,

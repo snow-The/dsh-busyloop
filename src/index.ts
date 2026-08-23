@@ -55,6 +55,10 @@ interface Channel {
   maxTokens?: number
   /** Optional context window in tokens (e.g. 262144 for 256K, 1000000 for 1M). When set, busyloop_run auto-budgets: truncates oversized prompts and caps maxTokens so every call stays inside the window (and its pricing tier). Provider-registered info takes precedence over this fallback; absent = unlimited. */
   contextWindow?: number
+  /** Channel-level default pacing: ms to wait before every LLM generation. Per-call delayMs overrides; absent = no delay. */
+  delayMs?: number
+  /** Channel-level default concurrency for batch runs (tasks). Per-call concurrency overrides; absent = 1 (serial). */
+  concurrency?: number
 }
 
 const CHANNELS: Record<'ark' | 'direct', Channel> = {
@@ -88,6 +92,8 @@ function loadCustomChannels(): Record<string, Channel> {
           keyEnv: v.keyEnv,
           maxTokens: typeof v.maxTokens === 'number' && v.maxTokens > 0 ? v.maxTokens : undefined,
           contextWindow: typeof v.contextWindow === 'number' && v.contextWindow > 0 ? v.contextWindow : undefined,
+          delayMs: typeof v.delayMs === 'number' && v.delayMs >= 0 ? v.delayMs : undefined,
+          concurrency: typeof v.concurrency === 'number' && v.concurrency > 0 ? Math.floor(v.concurrency) : undefined,
         }
       }
     }
@@ -117,7 +123,9 @@ function resolveChannel(channelKey: string, ctxLlm?: Parameters<typeof hostLlm>[
         const win = Number(anyP.contextWindow) > 0 ? Number(anyP.contextWindow) : undefined
         const firstModel = Array.isArray(anyP.models) ? anyP.models[0] as Record<string, unknown> | undefined : undefined
         const modelWin = firstModel && Number((firstModel as Record<string, unknown>).contextWindow) > 0 ? Number((firstModel as Record<string, unknown>).contextWindow) : undefined
-        if (baseURL && model && keyEnv) return { baseURL, model, keyEnv, contextWindow: win ?? modelWin }
+        const pDelay = Number(anyP.delayMs) >= 0 ? Number(anyP.delayMs) : undefined
+        const pConc = Number(anyP.concurrency) > 0 ? Math.floor(Number(anyP.concurrency)) : undefined
+        if (baseURL && model && keyEnv) return { baseURL, model, keyEnv, contextWindow: win ?? modelWin, delayMs: pDelay, concurrency: pConc }
       }
     } catch {
       /* provider probe failed — fall through to the explicit error */
@@ -201,6 +209,11 @@ export const DISCIPLINE_SYSTEM = [
   '9. 只通过可用工具获得结果,不臆造输出;如实汇报成功与失败,不掩盖错误。',
 ].join('\n')
 
+function sleep(ms: number): Promise<void> {
+  if (!(ms > 0)) return Promise.resolve()
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 /** Merge the caller's system prompt with the built-in discipline prompt. */
 function resolveSystem(custom: unknown, discipline: unknown): string | undefined {
   const customStr = typeof custom === 'string' && custom.trim() ? custom : undefined
@@ -246,6 +259,19 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
           enum: ['max', 'xhigh', 'high', 'medium', 'low', 'minimal', 'none'],
           description: 'Reasoning effort for this run (default: provider/channel default). Passed to the upstream API as reasoning_effort so the chat menu choice actually applies.',
         },
+        delayMs: {
+          type: 'number',
+          description: 'Throttle: ms to wait before EVERY LLM generation (per-turn pacing, anti rate-limit). Per-call value overrides the channel default; 0 = no delay. One router key can serve models with different limits — pass the right value for THIS model on the spot, nothing is hard-coded.',
+        },
+        tasks: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional batch: array of task prompts, each runs its own full loop on the same channel/model/settings. Results come back as an array with per-task output/error. Without tasks, single-prompt mode (prompt) applies.',
+        },
+        concurrency: {
+          type: 'number',
+          description: 'Batch concurrency: how many tasks run in parallel (default 1 = serial; channel config supplies the fallback). Combine with delayMs to pace a burst across the same key.',
+        },
       },
       output: {
         schema: { type: 'string' },
@@ -286,70 +312,109 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
         process.env[channel.keyEnv] = key
         const keyUsed = resolved.alias ? `${resolved.alias}(${resolved.masked})` : resolved.masked ?? 'unknown'
 
-        // Adaptive window budget (0.1.24): provider contextWindow > channel fallback > unlimited.
-        // Keeps every call inside the model's window (and its pricing tier) without hard-coding tiers.
-        const rawPrompt = String(args.prompt)
+        // 0.1.26 dynamic pacing/concurrency: per-call args > channel config > builtin defaults.
+        // Nothing is hard-coded: the caller adjusts on the spot, per model.
+        const delayMs =
+          args.delayMs !== undefined && Number(args.delayMs) >= 0
+            ? Number(args.delayMs)
+            : (channel.delayMs ?? 0)
+        const concurrency =
+          args.concurrency !== undefined && Number(args.concurrency) >= 1
+            ? Math.max(1, Math.floor(Number(args.concurrency)))
+            : (channel.concurrency ?? 1)
         const sysText = resolveSystem(args.system, args.discipline)
-        let prompt = rawPrompt
-        let maxTokens = args.maxTokens ? Number(args.maxTokens) : undefined
-        let budgetNote: string | undefined
-        const win = channel.contextWindow
-        if (win && win > 0) {
-          const inputEst = Math.ceil((rawPrompt.length + (sysText ?? '').length) / 3)
-          if (inputEst > win * 0.85) {
-            const keep = Math.floor(rawPrompt.length * 0.85)
-            const head = Math.floor(keep * 0.5)
-            prompt =
-              rawPrompt.slice(0, head) +
-              '\n\n...[truncated by busyloop window budget]...\n\n' +
-              rawPrompt.slice(rawPrompt.length - (keep - head))
-            budgetNote = `prompt truncated: ~${inputEst} tokens estimated vs ${win} window`
+
+        // Run one prompt through the loop, with the adaptive window budget
+        // (0.1.24: provider contextWindow > channel fallback > unlimited).
+        const runOne = async (rawPrompt: string) => {
+          let prompt = rawPrompt
+          let maxTokens = args.maxTokens ? Number(args.maxTokens) : undefined
+          let budgetNote: string | undefined
+          const win = channel.contextWindow
+          if (win && win > 0) {
+            const inputEst = Math.ceil((rawPrompt.length + (sysText ?? '').length) / 3)
+            if (inputEst > win * 0.85) {
+              const keep = Math.floor(rawPrompt.length * 0.85)
+              const head = Math.floor(keep * 0.5)
+              prompt =
+                rawPrompt.slice(0, head) +
+                '\n\n...[truncated by busyloop window budget]...\n\n' +
+                rawPrompt.slice(rawPrompt.length - (keep - head))
+              budgetNote = `prompt truncated: ~${inputEst} tokens estimated vs ${win} window`
+            }
+            const requested = maxTokens ?? channel.maxTokens ?? 2048
+            const headroom = win - Math.ceil(inputEst * 1.2) - 1024
+            if (requested > headroom) {
+              const capped = Math.max(256, headroom)
+              maxTokens = Math.min(requested, capped)
+              budgetNote = budgetNote ? `${budgetNote}; ` : ''
+              budgetNote += `maxTokens capped ${requested} -> ${maxTokens} (window ${win})`
+            }
           }
-          const requested = maxTokens ?? channel.maxTokens ?? 2048
-          const headroom = win - Math.ceil(inputEst * 1.2) - 1024
-          if (requested > headroom) {
-            const capped = Math.max(256, headroom)
-            maxTokens = Math.min(requested, capped)
-            budgetNote = budgetNote ? `${budgetNote}; ` : ''
-            budgetNote += `maxTokens capped ${requested} -> ${maxTokens} (window ${win})`
+          try {
+            const result = await runBusyLoop(llm, {
+              provider: 'deepseek',
+              model: channel.model,
+              prompt,
+              system: sysText,
+              maxTurns: args.maxTurns ? Number(args.maxTurns) : undefined,
+              maxTokens,
+              reasoningEffort: args.reasoningEffort ? String(args.reasoningEffort) : undefined,
+              delayMs,
+              signal: exec?.signal,
+              sessionId: 'busyloop-tools',
+            })
+            const note =
+              !result.output && result.finish === 'length'
+                ? `empty output: maxTokens exhausted before any content — thinking models spend tokens on reasoning_content first; raise maxTokens (current: ${args.maxTokens ?? channel.maxTokens ?? 2048}) or switch to a non-thinking model`
+                : undefined
+            return {
+              ok: true,
+              output: result.output,
+              turns: result.turns,
+              toolCalls: result.toolCalls,
+              finish: result.finish,
+              usage: result.usage ?? null,
+              ...(note ? { outputNote: note } : {}),
+              ...(budgetNote ? { budgetNote } : {}),
+            }
+          } catch (err) {
+            return { ok: false, error: err instanceof Error ? err.message : String(err) }
           }
         }
-        try {
-          const result = await runBusyLoop(llm, {
-            provider: 'deepseek',
-            model: channel.model,
-            prompt,
-            system: sysText,
-            maxTurns: args.maxTurns ? Number(args.maxTurns) : undefined,
-            maxTokens,
-            reasoningEffort: args.reasoningEffort ? String(args.reasoningEffort) : undefined,
-            signal: exec?.signal,
-            sessionId: 'busyloop-tools',
-          })
-          const note =
-            !result.output && result.finish === 'length'
-              ? `empty output: maxTokens exhausted before any content — thinking models spend tokens on reasoning_content first; raise maxTokens (current: ${args.maxTokens ?? channel.maxTokens ?? 2048}) or switch to a non-thinking model`
-              : undefined
-          return JSON.stringify({
-            ok: true,
-            channel: channelKey,
-            model: channel.model,
-            key: keyUsed,
-            output: result.output,
-            turns: result.turns,
-            toolCalls: result.toolCalls,
-            finish: result.finish,
-            usage: result.usage ?? null,
-            ...(note ? { outputNote: note } : {}),
-            ...(budgetNote ? { budgetNote } : {}),
-          })
-        } catch (err) {
-          return JSON.stringify({
-            ok: false,
-            channel: channelKey,
-            error: err instanceof Error ? err.message : String(err),
-          })
+
+        const tasks = Array.isArray(args.tasks) && args.tasks.length > 0
+          ? args.tasks.map((t: unknown) => String(t))
+          : undefined
+        if (!tasks) {
+          const r = await runOne(String(args.prompt))
+          return JSON.stringify({ channel: channelKey, model: channel.model, key: keyUsed, ...r })
         }
+        // Batch mode: bounded pool + per-task start spacing (delayMs) so a
+        // burst never slams the same router key at once. A failed task is
+        // reported per-item, it does not abort the batch.
+        const results: unknown[] = []
+        let next = 0
+        const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, async () => {
+          while (next < tasks.length) {
+            const i = next++
+            await sleep(delayMs)
+            const r = await runOne(tasks[i])
+            results[i] = { index: i, ...r }
+          }
+        })
+        await Promise.all(workers)
+        return JSON.stringify({
+          ok: true,
+          channel: channelKey,
+          model: channel.model,
+          key: keyUsed,
+          batch: true,
+          tasks: tasks.length,
+          concurrency,
+          delayMs,
+          results,
+        })
       },
     }),
   )
