@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-const { name, apply, createHonoApp, createBusyLoop, hostLlm, runBusyLoop, inject } = await import('../dist/index.js')
+const { name, apply, registerHttpRoutes, createBusyLoop, hostLlm, runBusyLoop, inject } = await import('../dist/index.js')
 
 /** Build a fake host LLM service that replays per-call chunk sequences. */
 function fakeLlm(sequences) {
@@ -180,21 +180,115 @@ test('createBusyLoop binds llm and health', async () => {
   assert.equal(result.output, 'via engine')
 })
 
-test('health endpoint responds 200 and apply mounts', async () => {
-  const app = createHonoApp()
-  const res = await app.fetch(new Request('http://localhost/health'))
-  assert.equal(res.status, 200)
-  const body = await res.json()
-  assert.equal(body.ok, true)
-  assert.equal(body.plugin, 'dsh-busyloop')
-  assert.equal(body.hostLlm, true)
+// 捕获 registerHttpRoutes 注册的路由, 并用假 req/res 调用它 —— 直接测我们自己的
+// handler, 而不是 Hono 的 Request/Response 适配层。
+function captureRoutes(deps) {
+  const routes = new Map();
+  // `deps` goes straight through: `rejected` is optional on the route helper now, so a caller that
+  // supplies only { llm } (or nothing) still gets working routes. Before that fix every route threw
+  // `rejected is not defined` on the first request -- see the fence note in src/index.ts.
+  registerHttpRoutes(deps ?? {}, (kind, path, handler) => { routes.set(path, { kind, handler }); });
+  const call = async (path, method = 'GET') => {
+    const route = routes.get(path);
+    if (!route) throw new Error('no route registered at ' + path);
+    const res = { statusCode: 0, headers: {}, body: undefined, setHeader(k, v) { this.headers[k] = v; }, end(b) { this.body = b; } };
+    await route.handler({ method, url: path }, res);
+    return res;
+  };
+  return { routes, call };
+}
 
-  let mounted = null
-  apply({ http: { mount: (path, a) => { mounted = { path, a } } } })
-  assert.equal(mounted.path, '/api/busyloop')
-  const res2 = await mounted.a.fetch(new Request('http://localhost/health'))
-  assert.equal(res2.status, 200)
+test('health endpoint responds 200 and apply mounts for real', async () => {
+  const { call } = captureRoutes({});
+  const res = await call('/api/busyloop/health');
+  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(String(res.body));
+  assert.equal(body.ok, true);
+  assert.equal(body.plugin, 'dsh-busyloop');
+  assert.equal(body.hostLlm, true);
+
+  // apply 现在注册到官方 ctx.webServer —— 通过 ctx.inject 收依赖。
+  // 直接读 ctx.webServer 会踩 cordis 的代理陷阱(见下面的 cordisCtx)。
+  const registered = [];
+  let effectLabel = null;
+  apply({
+    inject: (deps, cb) => {
+      assert.deepEqual(deps, ['webServer']);
+      return cb({ webServer: { register: (r) => { registered.push(r); return () => {}; } }, effect: (fn, label) => { effectLabel = label; fn(); } });
+    },
+  });
+  const paths = registered.map((r) => r.path).sort();
+  assert.deepEqual(paths, ['/api/busyloop/health', '/api/busyloop/providers']);
+  assert.match(String(effectLabel), /busyloop/);
+
+  // 非 GET 必须 405(官方范式里的 method 检查)
+  const notAllowed = await call('/api/busyloop/health', 'POST');
+  assert.equal(notAllowed.statusCode, 405);
+  assert.equal(notAllowed.headers['allow'], 'GET');
+
+  // 没有 webServer 时不应抛错(引擎仍可作为库使用)
+  apply({});
+  assert.doesNotThrow(() => apply(cordisCtx({ extra: { tools: { register: () => {} } } })));
 })
+
+// 复刻 cordis 的 ctx 代理: 读一个已注册但**未声明 inject** 的服务时, get 陷阱先抛
+// "cannot get property X without inject" —— 可选链 `ctx.webServer?.x` 挡不住。
+// 这正是本次迁移踩到的坑: 在 apply 里直接读 ctx.webServer 会让整个插件激活失败。
+function cordisCtx({ webServer, extra = {} } = {}) {
+  let inInject = false;
+  const target = {
+    ...extra,
+    inject: (deps, cb) => {
+      if (!deps.includes('webServer') || !webServer) return undefined;
+      const prev = inInject;
+      inInject = true;
+      try { return cb({ webServer, effect: extra.effect }); } finally { inInject = prev; }
+    },
+  };
+  return new Proxy(target, {
+    get(t, prop) {
+      if (prop === 'webServer' && !inInject) throw new Error('cannot get property "webServer" without inject');
+      return t[prop];
+    },
+  });
+}
+
+test('the cordis trap is real, and apply avoids it by using ctx.inject', () => {
+  const ctx = cordisCtx({ webServer: { register: () => () => {} } });
+  assert.throws(() => ctx.webServer, /without inject/);
+  assert.doesNotThrow(() => apply(ctx));
+})
+
+// 实测回归: busyloop 的 apply 早于 webServer 提供, ctx.inject 的回调**稍后**才触发;
+// 回调里一旦读 `ctx.llm`(未声明 inject 的已注册服务), 代理就抛, 而这个抛发生在
+// webCtx.effect() 里会被**静默吞掉** —— 路由一个都不注册, 请求落到 /api 前缀围栏返回 401。
+// 所以 llm 必须经 ctx.get 惰性读取。这个测试用一个"读 llm 就抛"的 ctx 复刻该场景。
+test('apply still registers routes when reading ctx.llm would throw', () => {
+  const registered = [];
+  let effectLabel = null;
+  const services = { llm: { fake: true } };
+  const ctx = new Proxy(
+    {
+      inject: (deps, cb) => cb({
+        webServer: { register: (r) => { registered.push(r); return () => {}; } },
+        effect: (fn, label) => { effectLabel = label; fn(); },
+      }),
+      get: (name) => services[name],
+    },
+    {
+      get(t, prop) {
+        if (prop === 'llm' && !('__insideGet' in t)) {
+          throw new Error('cannot get property "llm" without inject');
+        }
+        return t[prop];
+      },
+    },
+  );
+  assert.throws(() => ctx.llm, /without inject/);
+  assert.doesNotThrow(() => apply(ctx));
+  assert.deepEqual(registered.map((r) => r.path).sort(), ['/api/busyloop/health', '/api/busyloop/providers']);
+  assert.match(String(effectLabel), /busyloop/);
+});
 
 test('sessionId is stamped on every generation', async () => {
   const { service, seenOptions } = fakeLlm([textChunks('ok')])
@@ -209,18 +303,17 @@ test('sessionId is stamped on every generation', async () => {
 
 test('providers endpoint lists host providers when llm service present', async () => {
   const { service } = fakeLlm([textChunks('x')])
-  const app = createHonoApp({ llm: service })
-  const res = await app.fetch(new Request('http://localhost/providers'))
-  assert.equal(res.status, 200)
-  const body = await res.json()
-  assert.deepEqual(body.providers, [{ id: 'deepseek' }])
+  const { call } = captureRoutes({ llm: service });
+  const res = await call('/api/busyloop/providers');
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(JSON.parse(String(res.body)).providers, [{ id: 'deepseek' }])
 })
 
 test('providers endpoint degrades to empty list without llm service', async () => {
-  const app = createHonoApp()
-  const res = await app.fetch(new Request('http://localhost/providers'))
-  assert.equal(res.status, 200)
-  assert.deepEqual((await res.json()).providers, [])
+  const { call } = captureRoutes({});
+  const res = await call('/api/busyloop/providers');
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(JSON.parse(String(res.body)).providers, [])
 })
 
 test('apply tolerates host without http mount', () => {

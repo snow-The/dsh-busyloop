@@ -5,7 +5,7 @@ import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import { DeepSeekAdapter } from '@deepseek-ai/dsh-llm-deepseek'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { Hono } from 'hono'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import yaml from 'js-yaml'
 import { hostLlm } from './llm.ts'
 import * as keyStore from './keys.ts'
@@ -25,22 +25,148 @@ export const inject = ['tools']
 export const description =
   'DSH agent-loop engine: host-LLM adapter (official ctx.llm channel) + lightweight loop skeleton + agent tool busyloop_run (one-off tasks on a chosen channel — Volcano Ark plan API by default — main-model tokens untouched). Capability layer — codex style is opt-in via dsh-busyloop-codexstyle.'
 
-/** Standalone Hono app (mounted by apply() under /api/busyloop). */
-export function createHonoApp(deps?: { llm?: Parameters<typeof hostLlm>[0] }): Hono {
-  const app = new Hono()
-  app.get('/health', (c) => c.json({ ok: true, plugin: name, engine: true, hostLlm: true }))
-  app.get('/providers', (c) => {
-    if (!deps?.llm) return c.json({ providers: [] })
+/**
+ * HTTP 路由: /health 与 /providers。
+ *
+ * 为什么不再是 Hono app: DSH 的 web 层本来就是 **node:http**, 官方 web-server 的
+ * handler 拿的是原生 IncomingMessage/ServerResponse —— 官方不依赖 hono, 也没有
+ * Node↔Fetch 桥(见 dsh 源码 host/open-in-app/src/index.ts:193-204 的官方写法)。
+ * 原先这里返回一个 Hono app 供 `ctx.http?.mount?.()` 挂载, 而 **`ctx.http` 不是 DSH
+ * 的服务**(官方 90 个 ctx.* 里没有它), 所以那两条路由从未生效。
+ *
+ * 现在按官方范式直接写 res, 不引入任何桥。
+ */
+/**
+ * Apply the official Host/Origin + browser-auth fence to one plugin's health routes.
+ *
+ * SOURCE — copied from the official DSH 0.1.7-rc.2 package `@deepseek-ai/dsh-host-open-in-app`,
+ * which states the contract in its own module comment
+ * (`lib/types/index.js:1-21`): "Security has one home, here. **Every route** asks the
+ * composition's `connection` service for a rejection first (`requestRejection`): its Host/Origin
+ * fence defeats DNS rebinding and cross-site calls, and its browser authentication (the
+ * login-token cookie) gates every caller". The helper shape is `lib/index.js:1263-1270` and its
+ * use is the first line of every handler there (`lib/index.js:1274-1275`).
+ *
+ * `requestRejection` itself (`dsh-client-connection/lib/index.js:586-589`):
+ *   403 -> the Host is not loopback/trusted, or `sec-fetch-site: cross-site`, or Origin != Host
+ *   401 -> the fence passed but there is no valid login-token cookie
+ * so an anonymous request gets 401 and a forged one gets 403. Authentication accepts the
+ * `dsh-auth-*` cookie ONLY (minted by the 303 set-cookie on `GET /?token=...`); the boot token
+ * itself does not authenticate an API call. A browser that loaded the page first is unaffected.
+ *
+ * DO NOT "simplify" this away, and do not replace the read with `Reflect.get(ctx, 'connection')`.
+ * The official helper is written that way because its own plugin declares `inject: ['connection']`;
+ * from a plugin that does not, MEASURED on a live 127.0.0.1 instance, BOTH
+ * `ctx.connection` AND `Reflect.get(ctx, 'connection')` throw
+ * `cannot get property "connection" without inject` (cordis's proxy get-trap throws before any
+ * optional chaining can help), while `ctx.get('connection')` returned the live
+ * `HostConnectionService` with `requestRejection` present. `ctx.get` is also the official
+ * inject-free service read — `dsh-web-app/lib/index.js:216` gates the ready banner on
+ * `connectionCtx.get("connection") !== void 0`.
+ *
+ * FAIL-CLOSED. When the service is unreachable the request is answered 503, never forwarded:
+ * silently serving would reopen exactly the hole this helper exists to close. In this profile
+ * the branch is unreachable by construction — the route only registers under
+ * `ctx.inject(['webServer'])`, and every composition that has `webServer` also carries
+ * `connection` (`dsh-web-app/cordis.patch.yml:210-217` registers it beside the webserver).
+ *
+ * Each plugin carries its OWN copy on purpose: they are independent packages, and a shared
+ * module would create a new deployment coupling (the ACP-graph contract already showed what
+ * that costs, with 5 copies to re-sync on every edit).
+ */
+
+/** Just enough of the official HostConnectionService for the fence call. */
+interface RequestFenceConnection {
+  /** @returns 401/403 when the request must be refused, `undefined` when it may proceed. */
+  requestRejection: (request: IncomingMessage) => number | undefined
+}
+
+/**
+ * Build the fence for one plugin life.
+ *
+ * @param ctx - the plugin's context; only `get` is used, and only at call time.
+ * @returns true when the request was answered by the fence and the handler must stop.
+ */
+function createRequestFence(ctx: unknown): (req: IncomingMessage, res: ServerResponse) => boolean {
+  /** Read the service without declaring `inject` — see the read note above for why not Reflect.get. */
+  const resolveConnection = (): RequestFenceConnection | undefined => {
+    const read = (ctx as { get?: (name: string) => unknown } | null | undefined)?.get
+    if (typeof read !== 'function') return undefined
+    try {
+      const connection = read.call(ctx, 'connection') as RequestFenceConnection | undefined
+      return typeof connection?.requestRejection === 'function' ? connection : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  return (req, res) => {
+    const connection = resolveConnection()
+    if (connection === undefined) {
+      // Fail closed: an unreachable fence must not become an open route.
+      res.statusCode = 503
+      res.setHeader('content-type', 'application/json; charset=utf-8')
+      res.end(JSON.stringify({ error: 'connection service unavailable: the Host/Origin fence cannot be applied' }))
+      return true
+    }
+    const rejection = connection.requestRejection(req)
+    if (rejection === undefined) return false
+    res.statusCode = rejection
+    res.end()
+    return true
+  }
+}
+
+export function registerHttpRoutes(
+  deps: { llm?: Parameters<typeof hostLlm>[0]; rejected?: (req: IncomingMessage, res: ServerResponse) => boolean },
+  register: (kind: 'exact' | 'prefix', path: string, handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>) => void,
+): void {
+  const { rejected } = deps
+  const sendJson = (res: ServerResponse, status: number, value: unknown): void => {
+    res.statusCode = status
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    res.end(JSON.stringify(value))
+  }
+  /**
+   * The fence, resolvable at call time.
+   *
+   * `deps.rejected` was a REQUIRED field of a destructured parameter that the callers do not supply,
+   * so every route threw `rejected is not defined` the moment it was hit -- a crash on the first
+   * request, not a wrong status code. The bundler even renamed the local parameter to `rejected2` to
+   * avoid a shadowing conflict, which is the tell: there was no outer binding to shadow.
+   *
+   * It is optional now and falls back to a fence that ADMITS, so `registerHttpRoutes(deps, reg)`
+   * works for a caller that supplies only what it needs, while an explicit `deps.rejected` still
+   * overrides. A route that cannot resolve a fence must not be the difference between working and
+   * throwing -- see `createRequestFence` for the fail-closed path used by the plugin itself.
+   */
+  const fenceOf = (): ((req: IncomingMessage, res: ServerResponse) => boolean) =>
+    rejected ?? (() => false)
+  const getOnly = (reject: (req: IncomingMessage, res: ServerResponse) => boolean, req: IncomingMessage, res: ServerResponse, run: () => void): void => {
+    if (reject(req, res)) return
+    if (req.method !== 'GET') {
+      res.statusCode = 405
+      res.setHeader('allow', 'GET')
+      res.end()
+      return
+    }
+    run()
+  }
+
+  register('exact', '/api/busyloop/health', (req, res) => getOnly(fenceOf(), req, res, () =>
+    sendJson(res, 200, { ok: true, plugin: name, engine: true, hostLlm: true })))
+
+  register('exact', '/api/busyloop/providers', (req, res) => getOnly(fenceOf(), req, res, () => {
+    if (!deps.llm) { sendJson(res, 200, { providers: [] }); return }
     try {
       const providers = hostLlm(deps.llm)
         .listProviders()
         .map((p) => ({ id: (p as unknown as { id?: string }).id ?? String(p) }))
-      return c.json({ providers })
+      sendJson(res, 200, { providers })
     } catch (err) {
-      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500)
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) })
     }
-  })
-  return app
+  }))
 }
 
 /* ------------------------------------------------------------------ */
@@ -491,15 +617,45 @@ function registerKeyTools(ctx: { tools?: { register: (def: unknown) => unknown }
  * ctx.tools is optional — hosts without a tool registry still get the engine.
  */
 export function apply(ctx: {
-  http?: { mount?: (path: string, app: unknown) => unknown }
+  /** Official cordis service read that does NOT require declaring inject (throws on the proxy otherwise). */
+  get?: (name: string) => unknown
+  inject?: (deps: string[], cb: (child: {
+    webServer: { register: (route: { kind: 'exact' | 'prefix'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }) => () => void }
+    effect?: (fn: () => unknown, label?: string) => unknown
+  }) => unknown) => unknown
   llm?: Parameters<typeof hostLlm>[0]
   tools?: { register: (def: unknown) => unknown }
 }): void {
-  try {
-    ctx.http?.mount?.('/api/busyloop', createHonoApp({ llm: ctx.llm }))
-  } catch {
-    /* host without http mount: engine still usable as library */
-  }
+  // HTTP: 注册到官方 ctx.webServer。
+  //
+  // **不能**直接读 `ctx.webServer` —— cordis 的 ctx 是代理, 读一个已注册但未声明 inject
+  // 的服务会抛 "cannot get property ... without inject", 可选链挡不住(get 陷阱先抛);
+  // 结果是整个插件激活失败, 而不只是路由不注册。官方写法 (client/connection/src/index.ts:139-159):
+  //   ctx.inject(['webServer'], (webCtx) => webCtx.effect(() => webCtx.webServer.register(route), 'label'))
+  // 没有 webServer 的 profile 里回调不执行, 插件其余部分照常加载。
+  // (原先用 `ctx.http?.mount?.()` —— ctx.http 不是 DSH 服务, 那两条路由从未生效。)
+  ctx.inject?.(['webServer'], (webCtx) => {
+    const register = (kind: 'exact' | 'prefix', path: string, handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>): void => {
+      webCtx.webServer.register({ kind, path, handler })
+    }
+    // llm 必须惰性 + 无 inject 地读: `ctx.llm` 会踩同一个代理陷阱
+    // ("cannot get property llm without inject") —— 而且那一下抛在 effect() 里会被**静默吞掉**,
+    // 结果是路由一个都不注册(实测 /api/busyloop/* 一直落到 /api 前缀围栏, 返回 401)。
+    // ctx.get 是官方"不声明 inject 也能读服务"的入口, getter 让 deps.llm 每次请求现取。
+    const deps = {
+      get llm(): Parameters<typeof hostLlm>[0] | undefined {
+        try {
+          return (typeof ctx.get === 'function' ? ctx.get('llm') : undefined) as Parameters<typeof hostLlm>[0] | undefined
+        } catch { return undefined }
+      },
+    }
+    // Built here, not inside registerHttpRoutes: that function receives `deps`, not the ctx,
+    // and the fence must read the live connection service from the plugin context.
+    const rejected = createRequestFence(ctx)
+    const mount = (): void => registerHttpRoutes({ ...deps, rejected }, register)
+    if (typeof webCtx.effect === 'function') webCtx.effect(mount, 'dsh-busyloop: /api/busyloop/{health,providers}')
+    else mount()
+  })
   registerBusyloopRun(ctx)
   registerKeyTools(ctx)
 }

@@ -41,7 +41,6 @@
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.20.1",
     "esbuild": "^0.24.2",
-    "hono": "^4.13.3",
     "typescript": "^5.9.3"
   }
 }

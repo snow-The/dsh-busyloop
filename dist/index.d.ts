@@ -1,4 +1,4 @@
-import { Hono } from 'hono';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { hostLlm } from './llm.ts';
 import type { HostLlm } from './llm.ts';
 import type { BusyLoopOptions, LoopResult } from './types.ts';
@@ -12,10 +12,10 @@ export declare const name = "dsh-busyloop";
  */
 export declare const inject: string[];
 export declare const description = "DSH agent-loop engine: host-LLM adapter (official ctx.llm channel) + lightweight loop skeleton + agent tool busyloop_run (one-off tasks on a chosen channel \u2014 Volcano Ark plan API by default \u2014 main-model tokens untouched). Capability layer \u2014 codex style is opt-in via dsh-busyloop-codexstyle.";
-/** Standalone Hono app (mounted by apply() under /api/busyloop). */
-export declare function createHonoApp(deps?: {
+export declare function registerHttpRoutes(deps: {
     llm?: Parameters<typeof hostLlm>[0];
-}): Hono;
+    rejected?: (req: IncomingMessage, res: ServerResponse) => boolean;
+}, register: (kind: 'exact' | 'prefix', path: string, handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>) => void): void;
 /**
  * Built-in discipline system prompt for sub-loops (distilled from classic
  * engineering books: Clean Code / Refactoring / DDIA / System Design
@@ -28,9 +28,18 @@ export declare const DISCIPLINE_SYSTEM: string;
  * ctx.tools is optional — hosts without a tool registry still get the engine.
  */
 export declare function apply(ctx: {
-    http?: {
-        mount?: (path: string, app: unknown) => unknown;
-    };
+    /** Official cordis service read that does NOT require declaring inject (throws on the proxy otherwise). */
+    get?: (name: string) => unknown;
+    inject?: (deps: string[], cb: (child: {
+        webServer: {
+            register: (route: {
+                kind: 'exact' | 'prefix';
+                path: string;
+                handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
+            }) => () => void;
+        };
+        effect?: (fn: () => unknown, label?: string) => unknown;
+    }) => unknown) => unknown;
     llm?: Parameters<typeof hostLlm>[0];
     tools?: {
         register: (def: unknown) => unknown;
