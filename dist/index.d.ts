@@ -1,8 +1,13 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { hostLlm } from './llm.ts';
+import { type CredentialsService } from './credentials.ts';
 import type { HostLlm } from './llm.ts';
 import type { BusyLoopOptions, LoopResult } from './types.ts';
 export declare const name = "dsh-busyloop";
+/** Read the panel's channel overrides (also read by the call path — one validator, one merge rule). */
+export { readChannels as readChannelConfig, writeChannel as writeChannelConfig } from './panel.ts';
+export type { ChannelConfig } from './panel.ts';
+export { mask as maskCredential, describeRefs as describeCredentialRefs, store as storeCredential, remove as removeCredential, } from './credentials.ts';
 /**
  * cordis rule (crash lesson, 0.1.6): reading a REGISTERED service property off
  * ctx (e.g. ctx.tools) THROWS "cannot get property X without inject" unless the
@@ -15,7 +20,32 @@ export declare const description = "DSH agent-loop engine: host-LLM adapter (off
 export declare function registerHttpRoutes(deps: {
     llm?: Parameters<typeof hostLlm>[0];
     rejected?: (req: IncomingMessage, res: ServerResponse) => boolean;
+    /** Host credential service, read lazily off ctx. Absent = this host has none. */
+    credentials?: () => CredentialsService | undefined;
+    /** Built-in channels, as a getter so the panel reports exactly what a call would resolve. */
+    builtins?: () => Record<string, Channel>;
 }, register: (kind: 'exact' | 'prefix', path: string, handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>) => void): void;
+interface Channel {
+    baseURL: string;
+    model: string;
+    keyEnv: string;
+    /**
+     * Host credential this channel should use, instead of relying on `keyEnv` alone.
+     *
+     * This is what replaces the removed private key store: a channel NAMES a credential held by the
+     * host (`ctx.credentials`) rather than busyloop keeping a key of its own. It is set by the settings
+     * panel; absent means "resolve `keyEnv` through the host, then the environment, as before".
+     */
+    keyAlias?: string;
+    /** Optional per-channel output budget. Thinking models (kimi-k3, o-series, gpt-5.6-*) spend tokens in reasoning_content first — raise this when output comes back empty. Default 2048. */
+    maxTokens?: number;
+    /** Optional context window in tokens (e.g. 262144 for 256K, 1000000 for 1M). When set, busyloop_run auto-budgets: truncates oversized prompts and caps maxTokens so every call stays inside the window (and its pricing tier). Provider-registered info takes precedence over this fallback; absent = unlimited. */
+    contextWindow?: number;
+    /** Channel-level default pacing: ms to wait before every LLM generation. Per-call delayMs overrides; absent = no delay. */
+    delayMs?: number;
+    /** Channel-level default concurrency for batch runs (tasks). Per-call concurrency overrides; absent = 1 (serial). */
+    concurrency?: number;
+}
 /**
  * Resolve the credential for `keyEnv`, preferring the host service and falling back to the file.
  *

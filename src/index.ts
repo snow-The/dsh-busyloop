@@ -9,11 +9,44 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import yaml from 'js-yaml'
 import { hostLlm } from './llm.ts'
 import * as keyStore from './keys.ts'
+import {
+  channelsPath,
+  normaliseChannel,
+  readChannels,
+  writeChannel,
+  type ChannelConfig,
+} from './panel.ts'
+import {
+  credentialsFrom,
+  describeRefs,
+  mask,
+  remove as removeCredential,
+  resolveValue,
+  store as storeCredential,
+  type CredentialsService,
+} from './credentials.ts'
 import { runBusyLoop } from './loop.ts'
 import type { HostLlm } from './llm.ts'
 import type { BusyLoopOptions, LoopEvent, LoopResult, LoopTool } from './types.ts'
 
 export const name = 'dsh-busyloop'
+
+/* ------------------------------------------------------------------ */
+/* Exported for tests + the panel contract (this repo's convention:   */
+/* runBusyLoop/hostLlm are exported the same way). The panel routes   */
+/* are exercised directly, so their helpers must be reachable.        */
+/* ------------------------------------------------------------------ */
+
+/** Read the panel's channel overrides (also read by the call path — one validator, one merge rule). */
+export { readChannels as readChannelConfig, writeChannel as writeChannelConfig } from './panel.ts'
+export type { ChannelConfig } from './panel.ts'
+export {
+  mask as maskCredential,
+  describeRefs as describeCredentialRefs,
+  store as storeCredential,
+  remove as removeCredential,
+} from './credentials.ts'
+
 /**
  * cordis rule (crash lesson, 0.1.6): reading a REGISTERED service property off
  * ctx (e.g. ctx.tools) THROWS "cannot get property X without inject" unless the
@@ -118,7 +151,14 @@ function createRequestFence(ctx: unknown): (req: IncomingMessage, res: ServerRes
 }
 
 export function registerHttpRoutes(
-  deps: { llm?: Parameters<typeof hostLlm>[0]; rejected?: (req: IncomingMessage, res: ServerResponse) => boolean },
+  deps: {
+    llm?: Parameters<typeof hostLlm>[0]
+    rejected?: (req: IncomingMessage, res: ServerResponse) => boolean
+    /** Host credential service, read lazily off ctx. Absent = this host has none. */
+    credentials?: () => CredentialsService | undefined
+    /** Built-in channels, as a getter so the panel reports exactly what a call would resolve. */
+    builtins?: () => Record<string, Channel>
+  },
   register: (kind: 'exact' | 'prefix', path: string, handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>) => void,
 ): void {
   const { rejected } = deps
@@ -126,6 +166,50 @@ export function registerHttpRoutes(
     res.statusCode = status
     res.setHeader('content-type', 'application/json; charset=utf-8')
     res.end(JSON.stringify(value))
+  }
+  /** Read a JSON request body with a hard cap, so a large or hostile body cannot be buffered. */
+  const readJson = (req: IncomingMessage): Promise<Record<string, unknown>> =>
+    new Promise((resolve, reject) => {
+      let size = 0
+      const chunks: Buffer[] = []
+      const LIMIT = 64 * 1024
+      req.on('data', (chunk: Buffer) => {
+        size += chunk.length
+        if (size > LIMIT) { reject(new Error('body too large')); req.destroy(); return }
+        chunks.push(chunk)
+      })
+      req.on('end', () => {
+        try {
+          const text = Buffer.concat(chunks).toString('utf8')
+          const parsed = text ? JSON.parse(text) : {}
+          if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) { reject(new Error('body must be a JSON object')); return }
+          resolve(parsed as Record<string, unknown>)
+        } catch (err) { reject(err as Error) }
+      })
+      req.on('error', reject)
+    })
+  /** One handler shape for every panel route: fence first, then method check, then work. */
+  const route = (
+    method: 'GET' | 'POST' | 'DELETE',
+    run: (body: Record<string, unknown>, req: IncomingMessage, res: ServerResponse) => void | Promise<void>,
+  ) => async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    if (rejected ? rejected(req, res) : false) return
+    if (req.method !== method) {
+      res.statusCode = 405
+      res.setHeader('allow', method)
+      res.end()
+      return
+    }
+    let body: Record<string, unknown> = {}
+    if (method !== 'GET') {
+      try { body = await readJson(req) } catch (err) {
+        sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) })
+        return
+      }
+    }
+    try { await run(body, req, res) } catch (err) {
+      sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) })
+    }
   }
   /**
    * The fence, resolvable at call time.
@@ -167,6 +251,181 @@ export function registerHttpRoutes(
       sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) })
     }
   }))
+
+  /* ------------------------------------------------------------------ */
+  /* Settings-panel routes                                              */
+  /*                                                                    */
+  /* The panel exists so a channel is configured in ONE place, and so   */
+  /* the "which key?" question is answered by the HOST credential store */
+  /* instead of a private key file. Every route below:                  */
+  /*   - passes the fence first (it can read live credentials)          */
+  /*   - returns NO secret: masked tails and presence flags only        */
+  /* ------------------------------------------------------------------ */
+
+  const creds = (): CredentialsService | undefined => deps.credentials?.()
+
+  /** The stored override for one channel, if any — merged into edits so no field is lost. */
+  const storedOverride = (key: string): ChannelConfig | undefined => readChannels().channels[key]
+
+  /**
+   * The row the panel renders for one channel: merged config (panel override > built-in), where it
+   * came from, and WHICH credential would answer a call right now.
+   *
+   * This is what replaces "which key file is it using?": the same precedence the call path uses is
+   * evaluated here and reported, including the case where nothing resolves at all.
+   */
+  const channelRow = async (key: string): Promise<Record<string, unknown>> => {
+    const overrides = readChannels()
+    const builtin = deps.builtins?.()[key]
+    const override = overrides.channels[key]
+    const config = override ?? builtin
+    if (!config) return { key, present: false }
+    const from = override ? (builtin ? 'override' : 'file') : 'builtin'
+
+    // Precedence, identical to the call path: keyAlias (host record) -> keyEnv (host ref / env).
+    let via: string | undefined
+    let masked: string | undefined
+    if (config.keyAlias) {
+      const resolved = await resolveValue(creds(), config.keyAlias)
+      if (resolved) { via = `alias:${config.keyAlias}`; masked = mask(resolved.value) }
+    }
+    if (via === undefined) {
+      const resolved = await resolveValue(creds(), config.keyEnv)
+      if (resolved) { via = `credential:${config.keyEnv}`; masked = mask(resolved.value) }
+    }
+    if (via === undefined && typeof process.env[config.keyEnv] === 'string' && process.env[config.keyEnv]) {
+      // The call path writes the resolved key back into process.env, so an env-only key is live.
+      via = `env:${config.keyEnv}`
+      masked = mask(String(process.env[config.keyEnv]))
+    }
+
+    return {
+      key,
+      present: true,
+      from,
+      editable: true,
+      config,
+      keyEnv: config.keyEnv,
+      keyAlias: config.keyAlias ?? null,
+      via: via ?? null,
+      masked: masked ?? null,
+      callable: via !== undefined,
+    }
+  }
+
+  register('exact', '/api/busyloop/channels', route('GET', async (_body, _req, res) => {
+    const overrides = readChannels()
+    const keys = [...new Set([...Object.keys(deps.builtins?.() ?? {}), ...Object.keys(overrides.channels)])].sort()
+    const channels: Record<string, unknown>[] = []
+    for (const key of keys) channels.push(await channelRow(key))
+    sendJson(res, 200, {
+      ok: true,
+      channels,
+      file: channelsPath(),
+      fileError: overrides.error ?? null,
+      credentialsAvailable: creds() !== undefined,
+    })
+  }))
+
+  register('exact', '/api/busyloop/channel', route('POST', async (body, _req, res) => {
+    const key = typeof body.key === 'string' ? body.key.trim() : ''
+    if (!key) { sendJson(res, 400, { ok: false, error: 'key is required' }); return }
+    const remove = body.remove === true
+    if (remove) {
+      const result = writeChannel(key, { remove: true })
+      if (!result.ok) { sendJson(res, 400, { ok: false, error: result.error }); return }
+      sendJson(res, 200, { ok: true, key, removed: true, channel: await channelRow(key) })
+      return
+    }
+    // An edit MERGES with what is stored plus what is currently effective, so the panel may send
+    // only the changed fields without dropping baseURL/model/keyEnv.
+    const base = { ...(storedOverride(key) ?? {}), ...((await channelRow(key)).config as object | undefined) }
+    const patch: Record<string, unknown> = {}
+    for (const field of ['baseURL', 'model', 'keyEnv', 'keyAlias'] as const) {
+      if (typeof body[field] === 'string') patch[field] = (body[field] as string).trim()
+    }
+    for (const field of ['maxTokens', 'contextWindow', 'delayMs', 'concurrency'] as const) {
+      if (body[field] === null) { patch[field] = undefined; continue }
+      if (body[field] !== undefined) {
+        const n = Number(body[field])
+        if (Number.isFinite(n)) patch[field] = n
+      }
+    }
+    const result = writeChannel(key, { ...base, ...patch } as Partial<ChannelConfig>)
+    if (!result.ok) { sendJson(res, 400, { ok: false, error: result.error }); return }
+    sendJson(res, 200, { ok: true, key, removed: false, channel: await channelRow(key) })
+  }))
+
+  register('exact', '/api/busyloop/test', route('POST', async (body, _req, res) => {
+    const key = typeof body.key === 'string' ? body.key.trim() : ''
+    if (!key) { sendJson(res, 400, { ok: false, error: 'key is required' }); return }
+    const row = await channelRow(key)
+    if (row.present !== true) { sendJson(res, 404, { ok: false, error: `unknown channel "${key}"` }); return }
+    const config = row.config as ChannelConfig
+    // Resolve for THIS call only. The value goes into the env var the llm adapter reads for the
+    // duration of the request, then the previous state is restored, so a test never leaves a key
+    // resident in the process (and never clobbers one the user had set).
+    const ref = config.keyAlias ?? config.keyEnv
+    const resolved = await resolveValue(creds(), ref)
+    const envName = config.keyEnv
+    const hadEnv = Object.prototype.hasOwnProperty.call(process.env, envName)
+    const prevEnv = process.env[envName]
+    if (resolved) process.env[envName] = resolved.value
+    try {
+      const llm = deps.llm
+      if (!llm) { sendJson(res, 200, { ok: false, error: 'this host exposes no llm service' }); return }
+      const started = Date.now()
+      // One real turn through the SAME path the tool uses (runBusyLoop over ctx.llm), with a tiny
+      // budget and no pacing delay: the point is to prove the channel answers, not to generate.
+      const result = await runBusyLoop(hostLlm(llm), {
+        provider: 'deepseek',
+        model: config.model,
+        prompt: 'Reply with exactly: ok',
+        maxTurns: 1,
+        maxTokens: 32,
+        delayMs: 0,
+      })
+      const trimmed = (result.output ?? '').trim()
+      sendJson(res, 200, {
+        ok: trimmed.length > 0,
+        ms: Date.now() - started,
+        model: config.model,
+        baseURL: config.baseURL,
+        via: row.via,
+        turns: result.turns,
+        finish: result.finish,
+        preview: (result.output ?? '').slice(0, 200),
+        error: trimmed.length > 0 ? null : `the call returned no text (finish=${result.finish})`,
+      })
+    } catch (err) {
+      sendJson(res, 200, { ok: false, error: err instanceof Error ? err.message : String(err) })
+    } finally {
+      if (hadEnv) process.env[envName] = prevEnv
+      else delete process.env[envName]
+    }
+  }))
+
+  register('exact', '/api/busyloop/credentials', route('GET', async (_body, _req, res) => {
+    const overrides = readChannels()
+    const refs: string[] = []
+    for (const config of [...Object.values(deps.builtins?.() ?? {}), ...Object.values(overrides.channels)]) {
+      if (config.keyAlias) refs.push(config.keyAlias)
+      if (config.keyEnv) refs.push(config.keyEnv)
+    }
+    const rows = await describeRefs(creds(), refs)
+    sendJson(res, 200, { ok: true, credentials: rows, service: creds() !== undefined })
+  }))
+
+  register('exact', '/api/busyloop/credential', route('POST', async (body, _req, res) => {
+    const ref = typeof body.ref === 'string' ? body.ref.trim() : ''
+    if (body.remove === true) {
+      const result = await removeCredential(creds(), ref)
+      sendJson(res, result.ok ? 200 : 400, result)
+      return
+    }
+    const result = await storeCredential(creds(), ref, typeof body.value === 'string' ? body.value : '')
+    sendJson(res, result.ok ? 200 : 400, result)
+  }))
 }
 
 /* ------------------------------------------------------------------ */
@@ -177,6 +436,14 @@ interface Channel {
   baseURL: string
   model: string
   keyEnv: string
+  /**
+   * Host credential this channel should use, instead of relying on `keyEnv` alone.
+   *
+   * This is what replaces the removed private key store: a channel NAMES a credential held by the
+   * host (`ctx.credentials`) rather than busyloop keeping a key of its own. It is set by the settings
+   * panel; absent means "resolve `keyEnv` through the host, then the environment, as before".
+   */
+  keyAlias?: string
   /** Optional per-channel output budget. Thinking models (kimi-k3, o-series, gpt-5.6-*) spend tokens in reasoning_content first — raise this when output comes back empty. Default 2048. */
   maxTokens?: number
   /** Optional context window in tokens (e.g. 262144 for 256K, 1000000 for 1M). When set, busyloop_run auto-budgets: truncates oversized prompts and caps maxTokens so every call stays inside the window (and its pricing tier). Provider-registered info takes precedence over this fallback; absent = unlimited. */
@@ -204,37 +471,38 @@ const CHANNELS: Record<'ark' | 'direct', Channel> = {
  * P3: user-defined channels — ~/.dsh/busyloop-channels.json
  *   { "momotale": { "baseURL": "https://router.momotale.com/v1", "model": "kimi-k3", "keyEnv": "MOMOTALE_API_KEY" } }
  * No code change needed to add a new provider.
+ *
+ * The parsing lives in `panel.ts` (`readChannels`) because the settings panel reads the same file:
+ * one validator, one merge rule, one place to change. This function only narrows the panel-facing
+ * `ChannelConfig` to the internal `Channel` shape.
  */
 function loadCustomChannels(): Record<string, Channel> {
-  try {
-    const file = process.env.DSH_BUSYLOOP_CHANNELS ?? join(homedir(), '.dsh', 'busyloop-channels.json')
-    const raw = JSON.parse(readFileSync(file, 'utf8')) as Record<string, Partial<Channel>>
-    const out: Record<string, Channel> = {}
-    for (const [k, v] of Object.entries(raw ?? {})) {
-      if (v && typeof v.baseURL === 'string' && typeof v.model === 'string' && typeof v.keyEnv === 'string') {
-        out[k] = {
-          baseURL: v.baseURL,
-          model: v.model,
-          keyEnv: v.keyEnv,
-          maxTokens: typeof v.maxTokens === 'number' && v.maxTokens > 0 ? v.maxTokens : undefined,
-          contextWindow: typeof v.contextWindow === 'number' && v.contextWindow > 0 ? v.contextWindow : undefined,
-          delayMs: typeof v.delayMs === 'number' && v.delayMs >= 0 ? v.delayMs : undefined,
-          concurrency: typeof v.concurrency === 'number' && v.concurrency > 0 ? Math.floor(v.concurrency) : undefined,
-        }
-      }
+  const { channels } = readChannels()
+  const out: Record<string, Channel> = {}
+  for (const [key, config] of Object.entries(channels)) {
+    out[key] = {
+      baseURL: config.baseURL,
+      model: config.model,
+      keyEnv: config.keyEnv,
+      keyAlias: config.keyAlias,
+      maxTokens: config.maxTokens,
+      contextWindow: config.contextWindow,
+      delayMs: config.delayMs,
+      concurrency: config.concurrency,
     }
-    return out
-  } catch {
-    return {}
   }
+  return out
 }
 
-/** P1: resolve a channel by name — builtin → custom file → (guarded) host-registered providers. Throws with the available list otherwise. */
+/** P1: resolve a channel by name — panel override → builtin → host-registered providers. Throws with the available list otherwise. */
 function resolveChannel(channelKey: string, ctxLlm?: Parameters<typeof hostLlm>[0]): Channel {
-  const builtin = CHANNELS[channelKey as 'ark' | 'direct']
-  if (builtin) return builtin
+  // The override layer wins over the built-ins: the settings panel writes here, so a user can
+  // retarget `ark` or `direct` without patching the constants above. `normaliseChannel` has already
+  // validated it, so a malformed entry never reaches a call.
   const custom = loadCustomChannels()[channelKey]
   if (custom) return custom
+  const builtin = CHANNELS[channelKey as 'ark' | 'direct']
+  if (builtin) return builtin
   if (ctxLlm) {
     try {
       const providers = hostLlm(ctxLlm).listProviders() as unknown[]
@@ -473,11 +741,18 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
           return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) })
         }
         const { llm } = getRuntime(channelKey, llmCtx)
-        // Resolve the credential BEFORE calling the sync key resolver, so `keys.ts` keeps its
-        // synchronous contract and this one call site absorbs the await. The service is asked first
-        // (per-operation, so a rotation lands on the next call); the file read remains only as a
-        // fallback for a host with no credentials service.
-        const credential = await resolveCredential(ctx, channel.keyEnv, process.env[channel.keyEnv])
+        // Credential precedence, and the panel reports the very same order (see channelRow):
+        //   1. channel.keyAlias — the host credential this channel NAMES (set in the settings panel)
+        //   2. channel.keyEnv   — the host credential / environment variable for that name
+        //   3. the legacy key file — only for a host with no credentials service, so an existing
+        //      ~/.dsh/busyloop-keys.json keeps working instead of breaking on upgrade.
+        // Resolved BEFORE the sync key resolver is called, so `keys.ts` keeps its synchronous
+        // contract and this one call site absorbs the await. The service is asked per operation, so a
+        // rotated credential lands on the next call with no restart.
+        let credential = channel.keyAlias ? await resolveCredential(ctx, channel.keyAlias, undefined) : undefined
+        if (!credential) {
+          credential = await resolveCredential(ctx, channel.keyEnv, process.env[channel.keyEnv])
+        }
         const resolved = keyStore.resolveEffectiveKey(
           () => credential?.value,
           channel.keyEnv,
@@ -485,9 +760,12 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
         )
         const key = resolved.key
         if (!key) {
+          const tried = channel.keyAlias
+            ? `"${channel.keyAlias}" (the channel's keyAlias), "${channel.keyEnv}", env ${channel.keyEnv}`
+            : `"${channel.keyEnv}" and env ${channel.keyEnv}`
           return JSON.stringify({
             ok: false,
-            error: `No ${channel.keyEnv} found for channel "${channelKey}" (checked session keys, env, ctx.credentials and ${credentialsPath()})`,
+            error: `No credential found for channel "${channelKey}": tried ${tried} via ctx.credentials, plus ${credentialsPath()} as a legacy fallback. Set one in the settings panel (Settings -> busyloop).`,
           })
         }
         process.env[channel.keyEnv] = key
@@ -600,73 +878,6 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
     }),
   )
 }
-
-function registerKeyTools(ctx: { tools?: { register: (def: unknown) => unknown } }): void {
-  // NOTE: register is a class method using `this.layers` — must keep `this` bound.
-  const reg = ctx.tools?.register?.bind(ctx.tools)
-  if (!reg) return
-  reg(defineTool({
-    name: 'busyloop_key_add',
-    description: 'Register a per-session API key for busyloop_run (stored in ~/.dsh/busyloop-keys.json, 0600; NEVER written to env or global credentials). chat scope = selectable from this chat; subagent scope = reserved for subagent loops. Returns masked alias only.',
-    parameters: {
-      alias: { type: 'string', description: 'Short label, e.g. alice-ark', required: true },
-      key: { type: 'string', description: 'The API key (min 8 chars)', required: true },
-      scope: { type: 'string', description: 'chat (default) or subagent' },
-      channel: { type: 'string', description: 'Optional channel this key is bound to (ark/direct/custom name). When set, busyloop_run only uses this key for that channel — wrong-channel keys never leak into a call.' },
-    },
-    output: { schema: { type: 'string' }, render: (_a: unknown, v: string) => [{ type: 'text', text: v }] },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async execute(args: any) {
-      try {
-        const scope = args.scope === 'subagent' ? 'subagent' : 'chat'
-        const entry = keyStore.addKey(String(args.alias), String(args.key), scope, args.channel ? String(args.channel) : undefined)
-        return JSON.stringify({ ok: true, alias: entry.alias, scope: entry.scope, masked: keyStore.maskKey(entry.key) })
-      } catch (err) {
-        return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) })
-      }
-    },
-  }))
-  reg(defineTool({
-    name: 'busyloop_key_list',
-    description: 'List registered busyloop keys: alias + masked tail only (never the full key). Marks the currently active chat-scope key.',
-    parameters: {},
-    output: { schema: { type: 'string' }, render: (_a: unknown, v: string) => [{ type: 'text', text: v }] },
-    async execute() {
-      return JSON.stringify({ ok: true, keys: keyStore.listKeys() })
-    },
-  }))
-  reg(defineTool({
-    name: 'busyloop_key_remove',
-    description: 'Remove a registered busyloop key by alias.',
-    parameters: {
-      alias: { type: 'string', description: 'Alias of the key to remove', required: true },
-    },
-    output: { schema: { type: 'string' }, render: (_a: unknown, v: string) => [{ type: 'text', text: v }] },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async execute(args: any) {
-      const removed = keyStore.removeKey(String(args.alias))
-      return JSON.stringify({ ok: removed, removed: removed ? String(args.alias) : null })
-    },
-  }))
-  reg(defineTool({
-    name: 'busyloop_key_use',
-    description: 'Select a chat-scope busyloop key for THIS conversation: subsequent busyloop_run calls bill to it. Only chat-scope keys can be selected. Shows masked tail.',
-    parameters: {
-      alias: { type: 'string', description: 'Alias of the chat-scope key to activate', required: true },
-    },
-    output: { schema: { type: 'string' }, render: (_a: unknown, v: string) => [{ type: 'text', text: v }] },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async execute(args: any) {
-      try {
-        const info = keyStore.useKey(String(args.alias))
-        return JSON.stringify({ ...info })
-      } catch (err) {
-        return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) })
-      }
-    },
-  }))
-}
-
 /**
  * Plugin entry: mount health/providers endpoints + register the agent tool.
  * ctx.tools is optional — hosts without a tool registry still get the engine.
@@ -703,16 +914,23 @@ export function apply(ctx: {
           return (typeof ctx.get === 'function' ? ctx.get('llm') : undefined) as Parameters<typeof hostLlm>[0] | undefined
         } catch { return undefined }
       },
+      // The settings panel needs the credential service and the built-in channel table. Both are
+      // read the same lazy, guarded way as `llm` above — a bare `ctx.credentials` would take the
+      // whole effect down (and the throw would be swallowed), leaving the panel routes unregistered.
+      credentials: (): CredentialsService | undefined => credentialsFrom(ctx),
+      builtins: (): Record<string, Channel> => CHANNELS,
     }
     // Built here, not inside registerHttpRoutes: that function receives `deps`, not the ctx,
     // and the fence must read the live connection service from the plugin context.
     const rejected = createRequestFence(ctx)
     const mount = (): void => registerHttpRoutes({ ...deps, rejected }, register)
-    if (typeof webCtx.effect === 'function') webCtx.effect(mount, 'dsh-busyloop: /api/busyloop/{health,providers}')
+    if (typeof webCtx.effect === 'function') webCtx.effect(mount, 'dsh-busyloop: /api/busyloop/{health,providers,channels,test,credentials}')
     else mount()
   })
   registerBusyloopRun(ctx)
-  registerKeyTools(ctx)
+  // NOTE: `registerKeyTools` used to run here. Those four tools (busyloop_key_add/list/remove/use)
+  // were removed on purpose: busyloop must not keep a second credential store beside the host's.
+  // Selecting a key is now done in the settings panel, which drives `ctx.credentials`.
 }
 
 /** Wrap the host ctx into a ready-to-use engine handle. */

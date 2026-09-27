@@ -1,7 +1,7 @@
 // src/index.ts
-import { readFileSync as readFileSync2 } from "node:fs";
-import { join as join2 } from "node:path";
-import { homedir as homedir2 } from "node:os";
+import { readFileSync as readFileSync3 } from "node:fs";
+import { join as join3 } from "node:path";
+import { homedir as homedir3 } from "node:os";
 import { Context } from "@deepseek-ai/cordis";
 import LlmRuntime from "@deepseek-ai/dsh-llm";
 import { DeepSeekAdapter } from "@deepseek-ai/dsh-llm-deepseek";
@@ -22,7 +22,6 @@ function hostLlm(service) {
 }
 
 // src/keys.ts
-import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -39,47 +38,9 @@ function readStore() {
     return [];
   }
 }
-function writeStore(entries) {
-  mkdirSync(DSH_HOME, { recursive: true });
-  writeFileSync(KEY_FILE, JSON.stringify(entries, null, 2), "utf8");
-  try {
-    chmodSync(KEY_FILE, 384);
-  } catch {
-  }
-}
 function maskKey(key) {
   if (key.length <= 10) return `${key.slice(0, 2)}****`;
   return `${key.slice(0, 4)}****${key.slice(-4)}`;
-}
-function listKeys() {
-  const entries = readStore();
-  const active = readActiveAlias();
-  return entries.map((e) => ({ id: e.id, alias: e.alias, scope: e.scope, channel: e.channel, createdAt: e.createdAt, masked: maskKey(e.key), active: e.alias === active }));
-}
-function addKey(alias, key, scope, channel) {
-  const cleanAlias = alias.trim();
-  const cleanKey = key.trim();
-  const cleanChannel = channel?.trim() || void 0;
-  if (!cleanAlias) throw new Error("alias must not be empty");
-  if (!cleanKey) throw new Error("key must not be empty");
-  if (cleanKey.length < 8) throw new Error("key too short (min 8 chars)");
-  const entries = readStore();
-  if (entries.some((e) => e.alias === cleanAlias)) {
-    const updated = entries.map((e) => e.alias === cleanAlias ? { ...e, key: cleanKey, scope, channel: cleanChannel } : e);
-    writeStore(updated);
-    return updated.find((e) => e.alias === cleanAlias);
-  }
-  const entry = { id: randomUUID(), alias: cleanAlias, key: cleanKey, scope, channel: cleanChannel, createdAt: (/* @__PURE__ */ new Date()).toISOString() };
-  writeStore([...entries, entry]);
-  return entry;
-}
-function removeKey(alias) {
-  const entries = readStore();
-  const next = entries.filter((e) => e.alias !== alias);
-  if (next.length === entries.length) return false;
-  writeStore(next);
-  if (readActiveAlias() === alias) clearActiveAlias();
-  return true;
 }
 function readActiveAlias() {
   try {
@@ -88,27 +49,6 @@ function readActiveAlias() {
   } catch {
     return void 0;
   }
-}
-function writeActiveAlias(alias) {
-  mkdirSync(DSH_HOME, { recursive: true });
-  writeFileSync(ACTIVE_FILE, JSON.stringify({ alias }, null, 2), "utf8");
-  try {
-    chmodSync(ACTIVE_FILE, 384);
-  } catch {
-  }
-}
-function clearActiveAlias() {
-  try {
-    writeFileSync(ACTIVE_FILE, JSON.stringify({ alias: null }, null, 2), "utf8");
-  } catch {
-  }
-}
-function useKey(alias) {
-  const entry = readStore().find((e) => e.alias === alias);
-  if (!entry) throw new Error(`no key registered under alias "${alias}"`);
-  if (entry.scope !== "chat") throw new Error(`key "${alias}" is scope=${entry.scope}; only chat-scope keys can be selected from the chat`);
-  writeActiveAlias(alias);
-  return { ok: true, alias: entry.alias, masked: maskKey(entry.key) };
 }
 function resolveEffectiveKey(loadEnvKey, keyEnv, channel) {
   const active = readActiveAlias();
@@ -121,6 +61,177 @@ function resolveEffectiveKey(loadEnvKey, keyEnv, channel) {
   const envKey = loadEnvKey(keyEnv);
   if (envKey) return { key: envKey, masked: maskKey(envKey), source: "global" };
   return { source: "global" };
+}
+
+// src/panel.ts
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { dirname, join as join2 } from "node:path";
+function channelsPath() {
+  return process.env.DSH_BUSYLOOP_CHANNELS ?? join2(homedir2(), ".dsh", "busyloop-channels.json");
+}
+var posNum = (v) => typeof v === "number" && Number.isFinite(v) && v > 0 ? v : void 0;
+var nonNegNum = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : void 0;
+function normaliseChannel(raw) {
+  if (raw === null || typeof raw !== "object") return void 0;
+  const v = raw;
+  if (typeof v.baseURL !== "string" || !v.baseURL.trim()) return void 0;
+  if (typeof v.model !== "string" || !v.model.trim()) return void 0;
+  if (typeof v.keyEnv !== "string" || !v.keyEnv.trim()) return void 0;
+  const out = {
+    baseURL: v.baseURL.trim(),
+    model: v.model.trim(),
+    keyEnv: v.keyEnv.trim()
+  };
+  if (typeof v.keyAlias === "string" && v.keyAlias.trim()) out.keyAlias = v.keyAlias.trim();
+  const maxTokens = posNum(v.maxTokens);
+  if (maxTokens !== void 0) out.maxTokens = maxTokens;
+  const contextWindow = posNum(v.contextWindow);
+  if (contextWindow !== void 0) out.contextWindow = contextWindow;
+  const delayMs = nonNegNum(v.delayMs);
+  if (delayMs !== void 0) out.delayMs = delayMs;
+  const concurrency = posNum(v.concurrency);
+  if (concurrency !== void 0) out.concurrency = Math.floor(concurrency);
+  return out;
+}
+function readChannels() {
+  const file = channelsPath();
+  let text;
+  try {
+    text = readFileSync2(file, "utf8");
+  } catch (err) {
+    const code = err?.code;
+    return code === "ENOENT" ? { channels: {} } : { channels: {}, error: `cannot read ${file}: ${String(code ?? err)}` };
+  }
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch (err) {
+    return { channels: {}, error: `${file} is not valid JSON: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return { channels: {}, error: `${file} must contain a JSON object of channel name -> config` };
+  }
+  const channels = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const channel = normaliseChannel(value);
+    if (channel) channels[key] = channel;
+  }
+  return { channels };
+}
+function writeChannel(channelKey, patch) {
+  if (!channelKey || typeof channelKey !== "string") return { ok: false, error: "channel key required" };
+  const file = channelsPath();
+  const existing = readChannels();
+  if (existing.error && !existing.error.includes("ENOENT")) {
+    return { ok: false, error: `refusing to write: ${existing.error}` };
+  }
+  const next = { ...existing.channels };
+  if (patch.remove === true) {
+    delete next[channelKey];
+  } else {
+    const merged = normaliseChannel({ ...next[channelKey] ?? {}, ...patch });
+    if (merged) next[channelKey] = merged;
+    else return { ok: false, error: `channel "${channelKey}" needs baseURL, model and keyEnv` };
+  }
+  try {
+    mkdirSync2(dirname(file), { recursive: true });
+    const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
+    writeFileSync2(tmp, `${JSON.stringify(next, null, 2)}
+`, { mode: 384 });
+    renameSync(tmp, file);
+    return { ok: true, channels: next };
+  } catch (err) {
+    return { ok: false, error: `cannot write ${file}: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+// src/credentials.ts
+function mask(value) {
+  if (typeof value !== "string" || value.length === 0) return "(empty)";
+  if (value.length <= 8) return "*".repeat(value.length);
+  return `${"*".repeat(8)}${value.slice(-4)} (len ${value.length})`;
+}
+function credentialsFrom(ctx) {
+  try {
+    const service = typeof ctx?.get === "function" ? ctx.get("credentials") : void 0;
+    if (service && typeof service.resolve === "function") {
+      return service;
+    }
+    return void 0;
+  } catch {
+    return void 0;
+  }
+}
+async function resolveValue(service, ref) {
+  if (!service || typeof ref !== "string" || !ref) return void 0;
+  try {
+    const resolved = await service.resolve(ref);
+    if (!resolved || typeof resolved.value !== "string" || !resolved.value) return void 0;
+    return { value: resolved.value, source: String(resolved.source ?? "credentials") };
+  } catch {
+    return void 0;
+  }
+}
+async function describeRefs(service, refs) {
+  const wanted = [...new Set(refs.filter((r) => typeof r === "string" && r.length > 0))];
+  const extra = /* @__PURE__ */ new Set();
+  if (service?.listRecords) {
+    try {
+      const records = await service.listRecords();
+      for (const record of records ?? []) {
+        const name2 = typeof record === "string" ? record : record?.key ?? record?.name ?? record?.id;
+        if (typeof name2 === "string" && name2) extra.add(name2);
+      }
+    } catch {
+    }
+  }
+  const rows = [];
+  for (const ref of [...wanted, ...[...extra].filter((e) => !wanted.includes(e))]) {
+    const resolved = await resolveValue(service, ref);
+    if (resolved) {
+      rows.push({ ref, source: resolved.source, masked: mask(resolved.value), present: true });
+      continue;
+    }
+    let source;
+    if (service?.describe) {
+      try {
+        const info = await service.describe(ref);
+        source = info?.source;
+      } catch {
+        source = void 0;
+      }
+    }
+    rows.push({ ref, source, present: false });
+  }
+  return rows;
+}
+async function store(service, ref, value) {
+  if (!service) return { ok: false, error: "this host exposes no credentials service" };
+  if (typeof service.set !== "function") return { ok: false, error: "the credentials service cannot store values on this host" };
+  if (typeof ref !== "string" || !ref.trim()) return { ok: false, error: "a credential name is required" };
+  if (typeof value !== "string" || !value.trim()) return { ok: false, error: "a credential value is required" };
+  try {
+    await service.set(ref.trim(), value.trim());
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+  const check = await resolveValue(service, ref.trim());
+  if (!check) {
+    return { ok: false, error: `stored "${ref.trim()}" but the service could not read it back` };
+  }
+  return { ok: true, ref: ref.trim(), masked: mask(check.value) };
+}
+async function remove(service, ref) {
+  if (!service) return { ok: false, error: "this host exposes no credentials service" };
+  if (typeof service.unset !== "function") return { ok: false, error: "the credentials service cannot remove values on this host" };
+  if (typeof ref !== "string" || !ref.trim()) return { ok: false, error: "a credential name is required" };
+  try {
+    await service.unset(ref.trim());
+    return { ok: true, ref: ref.trim() };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 // src/loop.ts
@@ -255,6 +366,57 @@ function registerHttpRoutes(deps, register) {
     res.setHeader("content-type", "application/json; charset=utf-8");
     res.end(JSON.stringify(value));
   };
+  const readJson = (req) => new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    const LIMIT = 64 * 1024;
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > LIMIT) {
+        reject(new Error("body too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      try {
+        const text = Buffer.concat(chunks).toString("utf8");
+        const parsed = text ? JSON.parse(text) : {};
+        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+          reject(new Error("body must be a JSON object"));
+          return;
+        }
+        resolve(parsed);
+      } catch (err) {
+        reject(err);
+      }
+    });
+    req.on("error", reject);
+  });
+  const route = (method, run) => async (req, res) => {
+    if (rejected ? rejected(req, res) : false) return;
+    if (req.method !== method) {
+      res.statusCode = 405;
+      res.setHeader("allow", method);
+      res.end();
+      return;
+    }
+    let body = {};
+    if (method !== "GET") {
+      try {
+        body = await readJson(req);
+      } catch (err) {
+        sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+    }
+    try {
+      await run(body, req, res);
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  };
   const fenceOf = () => rejected ?? (() => false);
   const getOnly = (reject, req, res, run) => {
     if (reject(req, res)) return;
@@ -279,6 +441,171 @@ function registerHttpRoutes(deps, register) {
       sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
     }
   }));
+  const creds = () => deps.credentials?.();
+  const storedOverride = (key) => readChannels().channels[key];
+  const channelRow = async (key) => {
+    const overrides = readChannels();
+    const builtin = deps.builtins?.()[key];
+    const override = overrides.channels[key];
+    const config = override ?? builtin;
+    if (!config) return { key, present: false };
+    const from = override ? builtin ? "override" : "file" : "builtin";
+    let via;
+    let masked;
+    if (config.keyAlias) {
+      const resolved = await resolveValue(creds(), config.keyAlias);
+      if (resolved) {
+        via = `alias:${config.keyAlias}`;
+        masked = mask(resolved.value);
+      }
+    }
+    if (via === void 0) {
+      const resolved = await resolveValue(creds(), config.keyEnv);
+      if (resolved) {
+        via = `credential:${config.keyEnv}`;
+        masked = mask(resolved.value);
+      }
+    }
+    if (via === void 0 && typeof process.env[config.keyEnv] === "string" && process.env[config.keyEnv]) {
+      via = `env:${config.keyEnv}`;
+      masked = mask(String(process.env[config.keyEnv]));
+    }
+    return {
+      key,
+      present: true,
+      from,
+      editable: true,
+      config,
+      keyEnv: config.keyEnv,
+      keyAlias: config.keyAlias ?? null,
+      via: via ?? null,
+      masked: masked ?? null,
+      callable: via !== void 0
+    };
+  };
+  register("exact", "/api/busyloop/channels", route("GET", async (_body, _req, res) => {
+    const overrides = readChannels();
+    const keys = [.../* @__PURE__ */ new Set([...Object.keys(deps.builtins?.() ?? {}), ...Object.keys(overrides.channels)])].sort();
+    const channels = [];
+    for (const key of keys) channels.push(await channelRow(key));
+    sendJson(res, 200, {
+      ok: true,
+      channels,
+      file: channelsPath(),
+      fileError: overrides.error ?? null,
+      credentialsAvailable: creds() !== void 0
+    });
+  }));
+  register("exact", "/api/busyloop/channel", route("POST", async (body, _req, res) => {
+    const key = typeof body.key === "string" ? body.key.trim() : "";
+    if (!key) {
+      sendJson(res, 400, { ok: false, error: "key is required" });
+      return;
+    }
+    const remove2 = body.remove === true;
+    if (remove2) {
+      const result2 = writeChannel(key, { remove: true });
+      if (!result2.ok) {
+        sendJson(res, 400, { ok: false, error: result2.error });
+        return;
+      }
+      sendJson(res, 200, { ok: true, key, removed: true, channel: await channelRow(key) });
+      return;
+    }
+    const base = { ...storedOverride(key) ?? {}, ...(await channelRow(key)).config };
+    const patch = {};
+    for (const field of ["baseURL", "model", "keyEnv", "keyAlias"]) {
+      if (typeof body[field] === "string") patch[field] = body[field].trim();
+    }
+    for (const field of ["maxTokens", "contextWindow", "delayMs", "concurrency"]) {
+      if (body[field] === null) {
+        patch[field] = void 0;
+        continue;
+      }
+      if (body[field] !== void 0) {
+        const n = Number(body[field]);
+        if (Number.isFinite(n)) patch[field] = n;
+      }
+    }
+    const result = writeChannel(key, { ...base, ...patch });
+    if (!result.ok) {
+      sendJson(res, 400, { ok: false, error: result.error });
+      return;
+    }
+    sendJson(res, 200, { ok: true, key, removed: false, channel: await channelRow(key) });
+  }));
+  register("exact", "/api/busyloop/test", route("POST", async (body, _req, res) => {
+    const key = typeof body.key === "string" ? body.key.trim() : "";
+    if (!key) {
+      sendJson(res, 400, { ok: false, error: "key is required" });
+      return;
+    }
+    const row = await channelRow(key);
+    if (row.present !== true) {
+      sendJson(res, 404, { ok: false, error: `unknown channel "${key}"` });
+      return;
+    }
+    const config = row.config;
+    const ref = config.keyAlias ?? config.keyEnv;
+    const resolved = await resolveValue(creds(), ref);
+    const envName = config.keyEnv;
+    const hadEnv = Object.prototype.hasOwnProperty.call(process.env, envName);
+    const prevEnv = process.env[envName];
+    if (resolved) process.env[envName] = resolved.value;
+    try {
+      const llm = deps.llm;
+      if (!llm) {
+        sendJson(res, 200, { ok: false, error: "this host exposes no llm service" });
+        return;
+      }
+      const started = Date.now();
+      const result = await runBusyLoop(hostLlm(llm), {
+        provider: "deepseek",
+        model: config.model,
+        prompt: "Reply with exactly: ok",
+        maxTurns: 1,
+        maxTokens: 32,
+        delayMs: 0
+      });
+      const trimmed = (result.output ?? "").trim();
+      sendJson(res, 200, {
+        ok: trimmed.length > 0,
+        ms: Date.now() - started,
+        model: config.model,
+        baseURL: config.baseURL,
+        via: row.via,
+        turns: result.turns,
+        finish: result.finish,
+        preview: (result.output ?? "").slice(0, 200),
+        error: trimmed.length > 0 ? null : `the call returned no text (finish=${result.finish})`
+      });
+    } catch (err) {
+      sendJson(res, 200, { ok: false, error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      if (hadEnv) process.env[envName] = prevEnv;
+      else delete process.env[envName];
+    }
+  }));
+  register("exact", "/api/busyloop/credentials", route("GET", async (_body, _req, res) => {
+    const overrides = readChannels();
+    const refs = [];
+    for (const config of [...Object.values(deps.builtins?.() ?? {}), ...Object.values(overrides.channels)]) {
+      if (config.keyAlias) refs.push(config.keyAlias);
+      if (config.keyEnv) refs.push(config.keyEnv);
+    }
+    const rows = await describeRefs(creds(), refs);
+    sendJson(res, 200, { ok: true, credentials: rows, service: creds() !== void 0 });
+  }));
+  register("exact", "/api/busyloop/credential", route("POST", async (body, _req, res) => {
+    const ref = typeof body.ref === "string" ? body.ref.trim() : "";
+    if (body.remove === true) {
+      const result2 = await remove(creds(), ref);
+      sendJson(res, result2.ok ? 200 : 400, result2);
+      return;
+    }
+    const result = await store(creds(), ref, typeof body.value === "string" ? body.value : "");
+    sendJson(res, result.ok ? 200 : 400, result);
+  }));
 }
 var CHANNELS = {
   ark: {
@@ -293,33 +620,27 @@ var CHANNELS = {
   }
 };
 function loadCustomChannels() {
-  try {
-    const file = process.env.DSH_BUSYLOOP_CHANNELS ?? join2(homedir2(), ".dsh", "busyloop-channels.json");
-    const raw = JSON.parse(readFileSync2(file, "utf8"));
-    const out = {};
-    for (const [k, v] of Object.entries(raw ?? {})) {
-      if (v && typeof v.baseURL === "string" && typeof v.model === "string" && typeof v.keyEnv === "string") {
-        out[k] = {
-          baseURL: v.baseURL,
-          model: v.model,
-          keyEnv: v.keyEnv,
-          maxTokens: typeof v.maxTokens === "number" && v.maxTokens > 0 ? v.maxTokens : void 0,
-          contextWindow: typeof v.contextWindow === "number" && v.contextWindow > 0 ? v.contextWindow : void 0,
-          delayMs: typeof v.delayMs === "number" && v.delayMs >= 0 ? v.delayMs : void 0,
-          concurrency: typeof v.concurrency === "number" && v.concurrency > 0 ? Math.floor(v.concurrency) : void 0
-        };
-      }
-    }
-    return out;
-  } catch {
-    return {};
+  const { channels } = readChannels();
+  const out = {};
+  for (const [key, config] of Object.entries(channels)) {
+    out[key] = {
+      baseURL: config.baseURL,
+      model: config.model,
+      keyEnv: config.keyEnv,
+      keyAlias: config.keyAlias,
+      maxTokens: config.maxTokens,
+      contextWindow: config.contextWindow,
+      delayMs: config.delayMs,
+      concurrency: config.concurrency
+    };
   }
+  return out;
 }
 function resolveChannel(channelKey, ctxLlm) {
-  const builtin = CHANNELS[channelKey];
-  if (builtin) return builtin;
   const custom = loadCustomChannels()[channelKey];
   if (custom) return custom;
+  const builtin = CHANNELS[channelKey];
+  if (builtin) return builtin;
   if (ctxLlm) {
     try {
       const providers = hostLlm(ctxLlm).listProviders();
@@ -347,11 +668,11 @@ function resolveChannel(channelKey, ctxLlm) {
   );
 }
 function credentialsPath() {
-  return `${join2(homedir2(), ".dsh", ".credentials.yaml")}`;
+  return `${join3(homedir3(), ".dsh", ".credentials.yaml")}`;
 }
 function loadKeyFromFile(keyEnv) {
   try {
-    const creds = yaml.load(readFileSync2(credentialsPath(), "utf8"));
+    const creds = yaml.load(readFileSync3(credentialsPath(), "utf8"));
     return creds?.refs?.[keyEnv]?.value ?? creds?.refs?.[keyEnv] ?? creds?.[keyEnv];
   } catch {
     return void 0;
@@ -510,7 +831,10 @@ function registerBusyloopRun(ctx) {
           return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) });
         }
         const { llm } = getRuntime(channelKey, llmCtx);
-        const credential = await resolveCredential(ctx, channel.keyEnv, process.env[channel.keyEnv]);
+        let credential = channel.keyAlias ? await resolveCredential(ctx, channel.keyAlias, void 0) : void 0;
+        if (!credential) {
+          credential = await resolveCredential(ctx, channel.keyEnv, process.env[channel.keyEnv]);
+        }
         const resolved = resolveEffectiveKey(
           () => credential?.value,
           channel.keyEnv,
@@ -518,9 +842,10 @@ function registerBusyloopRun(ctx) {
         );
         const key = resolved.key;
         if (!key) {
+          const tried = channel.keyAlias ? `"${channel.keyAlias}" (the channel's keyAlias), "${channel.keyEnv}", env ${channel.keyEnv}` : `"${channel.keyEnv}" and env ${channel.keyEnv}`;
           return JSON.stringify({
             ok: false,
-            error: `No ${channel.keyEnv} found for channel "${channelKey}" (checked session keys, env, ctx.credentials and ${credentialsPath()})`
+            error: `No credential found for channel "${channelKey}": tried ${tried} via ctx.credentials, plus ${credentialsPath()} as a legacy fallback. Set one in the settings panel (Settings -> busyloop).`
           });
         }
         process.env[channel.keyEnv] = key;
@@ -609,70 +934,6 @@ function registerBusyloopRun(ctx) {
     })
   );
 }
-function registerKeyTools(ctx) {
-  const reg = ctx.tools?.register?.bind(ctx.tools);
-  if (!reg) return;
-  reg(defineTool({
-    name: "busyloop_key_add",
-    description: "Register a per-session API key for busyloop_run (stored in ~/.dsh/busyloop-keys.json, 0600; NEVER written to env or global credentials). chat scope = selectable from this chat; subagent scope = reserved for subagent loops. Returns masked alias only.",
-    parameters: {
-      alias: { type: "string", description: "Short label, e.g. alice-ark", required: true },
-      key: { type: "string", description: "The API key (min 8 chars)", required: true },
-      scope: { type: "string", description: "chat (default) or subagent" },
-      channel: { type: "string", description: "Optional channel this key is bound to (ark/direct/custom name). When set, busyloop_run only uses this key for that channel \u2014 wrong-channel keys never leak into a call." }
-    },
-    output: { schema: { type: "string" }, render: (_a, v) => [{ type: "text", text: v }] },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async execute(args) {
-      try {
-        const scope = args.scope === "subagent" ? "subagent" : "chat";
-        const entry = addKey(String(args.alias), String(args.key), scope, args.channel ? String(args.channel) : void 0);
-        return JSON.stringify({ ok: true, alias: entry.alias, scope: entry.scope, masked: maskKey(entry.key) });
-      } catch (err) {
-        return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) });
-      }
-    }
-  }));
-  reg(defineTool({
-    name: "busyloop_key_list",
-    description: "List registered busyloop keys: alias + masked tail only (never the full key). Marks the currently active chat-scope key.",
-    parameters: {},
-    output: { schema: { type: "string" }, render: (_a, v) => [{ type: "text", text: v }] },
-    async execute() {
-      return JSON.stringify({ ok: true, keys: listKeys() });
-    }
-  }));
-  reg(defineTool({
-    name: "busyloop_key_remove",
-    description: "Remove a registered busyloop key by alias.",
-    parameters: {
-      alias: { type: "string", description: "Alias of the key to remove", required: true }
-    },
-    output: { schema: { type: "string" }, render: (_a, v) => [{ type: "text", text: v }] },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async execute(args) {
-      const removed = removeKey(String(args.alias));
-      return JSON.stringify({ ok: removed, removed: removed ? String(args.alias) : null });
-    }
-  }));
-  reg(defineTool({
-    name: "busyloop_key_use",
-    description: "Select a chat-scope busyloop key for THIS conversation: subsequent busyloop_run calls bill to it. Only chat-scope keys can be selected. Shows masked tail.",
-    parameters: {
-      alias: { type: "string", description: "Alias of the chat-scope key to activate", required: true }
-    },
-    output: { schema: { type: "string" }, render: (_a, v) => [{ type: "text", text: v }] },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async execute(args) {
-      try {
-        const info = useKey(String(args.alias));
-        return JSON.stringify({ ...info });
-      } catch (err) {
-        return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) });
-      }
-    }
-  }));
-}
 function apply(ctx) {
   ctx.inject?.(["webServer"], (webCtx) => {
     const register = (kind, path, handler) => {
@@ -685,15 +946,19 @@ function apply(ctx) {
         } catch {
           return void 0;
         }
-      }
+      },
+      // The settings panel needs the credential service and the built-in channel table. Both are
+      // read the same lazy, guarded way as `llm` above — a bare `ctx.credentials` would take the
+      // whole effect down (and the throw would be swallowed), leaving the panel routes unregistered.
+      credentials: () => credentialsFrom(ctx),
+      builtins: () => CHANNELS
     };
     const rejected = createRequestFence(ctx);
     const mount = () => registerHttpRoutes({ ...deps, rejected }, register);
-    if (typeof webCtx.effect === "function") webCtx.effect(mount, "dsh-busyloop: /api/busyloop/{health,providers}");
+    if (typeof webCtx.effect === "function") webCtx.effect(mount, "dsh-busyloop: /api/busyloop/{health,providers,channels,test,credentials}");
     else mount();
   });
   registerBusyloopRun(ctx);
-  registerKeyTools(ctx);
 }
 function createBusyLoop(ctx) {
   const llm = hostLlm(ctx.llm);
@@ -707,11 +972,17 @@ export {
   DISCIPLINE_SYSTEM,
   apply,
   createBusyLoop,
+  describeRefs as describeCredentialRefs,
   description,
   hostLlm,
   inject,
+  mask as maskCredential,
   name,
+  readChannels as readChannelConfig,
   registerHttpRoutes,
+  remove as removeCredential,
   resolveCredential,
-  runBusyLoop
+  runBusyLoop,
+  store as storeCredential,
+  writeChannel as writeChannelConfig
 };

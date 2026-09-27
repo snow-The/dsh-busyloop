@@ -219,7 +219,17 @@ test('health endpoint responds 200 and apply mounts for real', async () => {
     },
   });
   const paths = registered.map((r) => r.path).sort();
-  assert.deepEqual(paths, ['/api/busyloop/health', '/api/busyloop/providers']);
+  // The six panel routes are part of the surface now: the settings panel drives them, and they are
+  // asserted separately in panel.test.mjs. This list is the "what does apply() mount" contract.
+  assert.deepEqual(paths, [
+    '/api/busyloop/channel',
+    '/api/busyloop/channels',
+    '/api/busyloop/credential',
+    '/api/busyloop/credentials',
+    '/api/busyloop/health',
+    '/api/busyloop/providers',
+    '/api/busyloop/test',
+  ]);
   assert.match(String(effectLabel), /busyloop/);
 
   // 非 GET 必须 405(官方范式里的 method 检查)
@@ -287,7 +297,15 @@ test('apply still registers routes when reading ctx.llm would throw', () => {
   );
   assert.throws(() => ctx.llm, /without inject/);
   assert.doesNotThrow(() => apply(ctx));
-  assert.deepEqual(registered.map((r) => r.path).sort(), ['/api/busyloop/health', '/api/busyloop/providers']);
+  assert.deepEqual(registered.map((r) => r.path).sort(), [
+    '/api/busyloop/channel',
+    '/api/busyloop/channels',
+    '/api/busyloop/credential',
+    '/api/busyloop/credentials',
+    '/api/busyloop/health',
+    '/api/busyloop/providers',
+    '/api/busyloop/test',
+  ]);
   assert.match(String(effectLabel), /busyloop/);
 });
 
@@ -321,11 +339,14 @@ test('apply tolerates host without http mount', () => {
   apply({})
 })
 
-test('apply registers the busyloop_run agent tool when ctx.tools present', () => {
+test('apply registers ONLY busyloop_run — the four key tools are gone by design', () => {
   const registered = []
   apply({ tools: { register: (def) => registered.push(def) } })
   const names = registered.map((d) => d.name)
-  assert.deepEqual(names, ['busyloop_run','busyloop_key_add','busyloop_key_list','busyloop_key_remove','busyloop_key_use'])
+  // The key tools were removed deliberately: busyloop must not keep a second credential store
+  // beside the host's. Selecting a credential now happens in the settings panel, which drives
+  // ctx.credentials. This assertion is the guard against them creeping back.
+  assert.deepEqual(names, ['busyloop_run'])
 })
 
 test('apply tolerates host without tool registry', () => {
@@ -349,7 +370,12 @@ test('busyloop_run fails cleanly without a key (no API call)', async () => {
     const raw = await run.execute({ prompt: 'Say hi' })
     const out = JSON.parse(raw)
     assert.equal(out.ok, false)
-    assert.match(out.error, /No ARK_API_KEY found/)
+    // The message now names the channel AND each reference that was tried, because "which key is
+    // missing" was previously guesswork: it must still say no credential was found, and must point
+    // at the one place that can fix it (the settings panel).
+    assert.match(out.error, /No credential found for channel "ark"/)
+    assert.match(out.error, /ARK_API_KEY/)
+    assert.match(out.error, /settings panel/)
   } finally {
     if (prevHome === undefined) delete process.env.USERPROFILE
     else process.env.USERPROFILE = prevHome
