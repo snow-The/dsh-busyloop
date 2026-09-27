@@ -24,9 +24,9 @@ const creds = yaml.load(
 )
 const useArk = process.env.DSH_E2E_ARK === '1'
 const KEY_ENV = useArk ? 'ARK_API_KEY' : 'DEEPSEEK_API_KEY'
-// Ark plan API only serves deepseek-v4-flash (agent-plan models); the direct
+// Ark plan API only serves deepseek-v4.1-flash (agent-plan models); the direct
 // DeepSeek API serves deepseek-chat.
-const MODEL = useArk ? 'deepseek-v4-flash' : 'deepseek-chat'
+const MODEL = useArk ? 'deepseek-v4.1-flash' : 'deepseek-chat'
 const key = creds.refs?.[KEY_ENV]?.value ?? creds.refs?.[KEY_ENV] ?? creds[KEY_ENV]
 if (!key) {
   console.error(`NO KEY: ~/.dsh/.credentials.yaml missing ${KEY_ENV}`)

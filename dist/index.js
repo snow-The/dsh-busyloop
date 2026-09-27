@@ -283,7 +283,7 @@ function registerHttpRoutes(deps, register) {
 var CHANNELS = {
   ark: {
     baseURL: "https://ark.cn-beijing.volces.com/api/plan/v3",
-    model: "deepseek-v4-flash",
+    model: "deepseek-v4.1-flash",
     keyEnv: "ARK_API_KEY"
   },
   direct: {
@@ -441,7 +441,7 @@ function registerBusyloopRun(ctx) {
   ctx.tools?.register(
     defineTool({
       name: "busyloop_run",
-      description: "Run one one-off subagent loop on a cheap channel (default: Volcano Ark plan API with deepseek-v4-flash, billed to the ARK key \u2014 main-model tokens untouched). Returns the loop output plus turn/tool-call/usage stats. Use for disposable research, validation, formatting, or any task that does not need the main conversation context.",
+      description: "Run one one-off subagent loop on a cheap channel (default: Volcano Ark plan API with deepseek-v4.1-flash, billed to the ARK key \u2014 main-model tokens untouched). Returns the loop output plus turn/tool-call/usage stats. Use for disposable research, validation, formatting, or any task that does not need the main conversation context.",
       parameters: {
         prompt: {
           type: "string",
@@ -450,7 +450,7 @@ function registerBusyloopRun(ctx) {
         },
         channel: {
           type: "string",
-          description: "Which LLM channel to use: ark (default) = Volcano Ark plan API (deepseek-v4-flash, ARK_API_KEY); direct = api.deepseek.com (deepseek-chat, DEEPSEEK_API_KEY); or any channel defined in ~/.dsh/busyloop-channels.json. Unknown channels error out listing the available ones."
+          description: "Which LLM channel to use: ark (default) = Volcano Ark plan API (deepseek-v4.1-flash, ARK_API_KEY); direct = api.deepseek.com (deepseek-chat, DEEPSEEK_API_KEY); or any channel defined in ~/.dsh/busyloop-channels.json. Unknown channels error out listing the available ones."
         },
         system: {
           type: "string",
