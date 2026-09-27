@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-const { name, apply, registerHttpRoutes, createBusyLoop, hostLlm, runBusyLoop, inject } = await import('../dist/index.js')
+const { name, apply, registerHttpRoutes, createBusyLoop, hostLlm, runBusyLoop, inject, resolveCredential } =
+  await import('../dist/index.js')
 
 /** Build a fake host LLM service that replays per-call chunk sequences. */
 function fakeLlm(sequences) {
@@ -354,6 +355,70 @@ test('busyloop_run fails cleanly without a key (no API call)', async () => {
     else process.env.USERPROFILE = prevHome
     if (prevArk === undefined) delete process.env.ARK_API_KEY
     else process.env.ARK_API_KEY = prevArk
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// credential resolution: the host service first, the file only as a fallback
+// ---------------------------------------------------------------------------
+
+test('resolveCredential prefers ctx.credentials and never reads the file when it answers', async () => {
+  // A fake service is enough to pin the precedence, and it keeps the test away from the real
+  // ~/.dsh/.credentials.yaml (which holds live keys).
+  const calls = []
+  const ctx = {
+    get: (n) => (n === 'credentials'
+      ? { resolve: async (ref) => { calls.push(ref); return { value: 'from-service', source: 'user-env' } } }
+      : undefined),
+  }
+  const got = await resolveCredential(ctx, 'SOME_KEY', undefined)
+  assert.equal(got.value, 'from-service')
+  assert.equal(got.source, 'ctx.credentials')
+  assert.deepEqual(calls, ['SOME_KEY'], 'the ref passed to the service is the env-var name')
+})
+
+test('resolveCredential: an explicit env override wins over the service', async () => {
+  let touched = false
+  const ctx = { get: () => ({ resolve: async () => { touched = true; return { value: 'from-service' } } }) }
+  const got = await resolveCredential(ctx, 'SOME_KEY', 'from-override')
+  assert.equal(got.value, 'from-override')
+  assert.equal(got.source, 'env-override')
+  assert.equal(touched, false, 'the service must not be consulted when an override is present')
+})
+
+test('resolveCredential falls back to the file, and degrades when the service throws', async () => {
+  // Point HOME at a throwaway dir so the fallback reads a file WE control, never the real one.
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const home = await mkdtemp(join(tmpdir(), 'busyloop-cred-'))
+  const prevHome = process.env.USERPROFILE
+  const prevHomePosix = process.env.HOME
+  try {
+    process.env.USERPROFILE = home
+    process.env.HOME = home
+    await mkdir(join(home, '.dsh'), { recursive: true })
+    await writeFile(join(home, '.dsh', '.credentials.yaml'), 'refs:\n  FILE_KEY: file-value\n', 'utf8')
+
+    // service throws (e.g. a name outside the reference grammar) -> must fall through, not throw
+    const throwing = { get: () => ({ resolve: async () => { throw new Error('not a reference') } }) }
+    const got = await resolveCredential(throwing, 'FILE_KEY', undefined)
+    assert.equal(got.value, 'file-value')
+    assert.equal(got.source, 'file')
+
+    // no service at all -> same fallback
+    const got2 = await resolveCredential({}, 'FILE_KEY', undefined)
+    assert.equal(got2.value, 'file-value')
+
+    // neither -> undefined, and it must NOT invent a value
+    const missing = await resolveCredential({}, 'ABSENT_KEY', undefined)
+    assert.equal(missing, undefined)
+  } finally {
+    if (prevHome === undefined) delete process.env.USERPROFILE
+    else process.env.USERPROFILE = prevHome
+    if (prevHomePosix === undefined) delete process.env.HOME
+    else process.env.HOME = prevHomePosix
     await rm(home, { recursive: true, force: true })
   }
 })

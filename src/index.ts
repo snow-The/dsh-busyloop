@@ -267,9 +267,17 @@ function credentialsPath(): string {
   return `${join(homedir(), '.dsh', '.credentials.yaml')}`
 }
 
-function loadKey(keyEnv: string): string | undefined {
-  // Env wins (test/debug override), then ~/.dsh/.credentials.yaml.
-  if (process.env[keyEnv]) return process.env[keyEnv]
+/**
+ * Read a credential the WRONG way: straight off disk.
+ *
+ * Kept only as a fallback for a host that composes no `credentials` service. The right path is
+ * `resolveCredential` below, for three reasons the service's own contract states:
+ *   - the value is owned by a provider, not by this plugin's idea of a file location;
+ *   - resolution is PER OPERATION, so a rotated credential reaches the next call without a restart
+ *     (reading the file bakes in whatever was on disk when the plugin loaded);
+ *   - the plugin stops touching secret material on disk at all.
+ */
+function loadKeyFromFile(keyEnv: string): string | undefined {
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const creds: any = yaml.load(readFileSync(credentialsPath(), 'utf8'))
@@ -277,6 +285,44 @@ function loadKey(keyEnv: string): string | undefined {
   } catch {
     return undefined
   }
+}
+
+/** The official credential read, without declaring `inject` (ctx.get is the inject-free form). */
+function credentialsService(ctx: unknown): { resolve?: (ref: unknown) => Promise<{ value?: string } | undefined> } | undefined {
+  const read = (ctx as { get?: (name: string) => unknown } | null | undefined)?.get
+  if (typeof read !== 'function') return undefined
+  try {
+    const svc = read.call(ctx, 'credentials') as { resolve?: unknown } | undefined
+    return svc && typeof svc.resolve === 'function' ? (svc as never) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Resolve the credential for `keyEnv`, preferring the host service and falling back to the file.
+ *
+ * Async because `credentials.resolve` is, and the only call site is already inside the async tool
+ * handler -- so nothing upstream has to change. Deliberately NOT cached: the service contract says
+ * consumers "must not cache across operations", which is exactly the property we want (a rotation
+ * takes effect on the next busyloop_run instead of the next DSH restart).
+ */
+export async function resolveCredential(
+  ctx: unknown,
+  keyEnv: string,
+  envOverride: string | undefined,
+): Promise<{ value: string; source: string } | undefined> {  if (envOverride) return { value: envOverride, source: 'env-override' }
+  const svc = credentialsService(ctx)
+  if (svc?.resolve) {
+    try {
+      const r = await svc.resolve(keyEnv)
+      if (r && typeof r.value === 'string' && r.value) return { value: r.value, source: 'ctx.credentials' }
+    } catch {
+      /* a name outside the reference grammar, or a provider that cannot answer: fall through */
+    }
+  }
+  const fromFile = loadKeyFromFile(keyEnv)
+  return fromFile ? { value: fromFile, source: 'file' } : undefined
 }
 
 // One shared runtime per channel, built on first use.
@@ -427,12 +473,21 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
           return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) })
         }
         const { llm } = getRuntime(channelKey, llmCtx)
-        const resolved = keyStore.resolveEffectiveKey(loadKey, channel.keyEnv, channelKey)
+        // Resolve the credential BEFORE calling the sync key resolver, so `keys.ts` keeps its
+        // synchronous contract and this one call site absorbs the await. The service is asked first
+        // (per-operation, so a rotation lands on the next call); the file read remains only as a
+        // fallback for a host with no credentials service.
+        const credential = await resolveCredential(ctx, channel.keyEnv, process.env[channel.keyEnv])
+        const resolved = keyStore.resolveEffectiveKey(
+          () => credential?.value,
+          channel.keyEnv,
+          channelKey,
+        )
         const key = resolved.key
         if (!key) {
           return JSON.stringify({
             ok: false,
-            error: `No ${channel.keyEnv} found for channel "${channelKey}" (checked session keys, env and ${credentialsPath()})`,
+            error: `No ${channel.keyEnv} found for channel "${channelKey}" (checked session keys, env, ctx.credentials and ${credentialsPath()})`,
           })
         }
         process.env[channel.keyEnv] = key

@@ -17,6 +17,18 @@ export declare function registerHttpRoutes(deps: {
     rejected?: (req: IncomingMessage, res: ServerResponse) => boolean;
 }, register: (kind: 'exact' | 'prefix', path: string, handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>) => void): void;
 /**
+ * Resolve the credential for `keyEnv`, preferring the host service and falling back to the file.
+ *
+ * Async because `credentials.resolve` is, and the only call site is already inside the async tool
+ * handler -- so nothing upstream has to change. Deliberately NOT cached: the service contract says
+ * consumers "must not cache across operations", which is exactly the property we want (a rotation
+ * takes effect on the next busyloop_run instead of the next DSH restart).
+ */
+export declare function resolveCredential(ctx: unknown, keyEnv: string, envOverride: string | undefined): Promise<{
+    value: string;
+    source: string;
+} | undefined>;
+/**
  * Built-in discipline system prompt for sub-loops (distilled from classic
  * engineering books: Clean Code / Refactoring / DDIA / System Design
  * Interview / game-design practices / reverse-engineering methodology).
