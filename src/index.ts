@@ -662,7 +662,33 @@ function resolveSystem(custom: unknown, discipline: unknown): string | undefined
   return DISCIPLINE_SYSTEM
 }
 
-function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknown }; llm?: Parameters<typeof hostLlm>[0] }): void {
+/**
+ * Read the host llm service the official inject-free way, or undefined when there is none.
+ *
+ * ONE implementation for both halves of this plugin, because they used to disagree: the routes went
+ * through `ctx.get('llm')` while the tool did a bare `ctx.llm` inside a try/catch with a comment
+ * claiming property access throws. It does not — cordis's proxy throws when a REGISTERED service is
+ * read through an undeclared inject, and `ctx.get(name)` is the documented way to read without
+ * declaring. `ctx.get` itself throws for a service this host does not register, so the guard stays.
+ *
+ * The `listProviders` probe is kept on top: it separates "the service exists" from "the service is
+ * the LLM runtime we expect", and a custom channel works with neither.
+ */
+export function readLlmService(  ctx: { get?: (name: string) => unknown } | undefined,
+): Parameters<typeof hostLlm>[0] | undefined {
+  let candidate: unknown
+  try {
+    candidate = typeof ctx?.get === 'function' ? ctx.get('llm') : undefined
+  } catch {
+    return undefined // this host registers no llm service
+  }
+  if (candidate && typeof (candidate as { listProviders?: unknown }).listProviders === 'function') {
+    return candidate as Parameters<typeof hostLlm>[0]
+  }
+  return undefined
+}
+
+function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknown }; get?: (name: string) => unknown }): void {
   ctx.tools?.register(
     defineTool({
       name: 'busyloop_run',
@@ -720,27 +746,14 @@ function registerBusyloopRun(ctx: { tools?: { register: (def: unknown) => unknow
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       async execute(args: any, exec: any) {
         const channelKey = String(args.channel ?? 'ark')
-        // cordis proxy rule: reading an undeclared service property THROWS at
-        // runtime even when the type is optional — guard the host-llm probe.
-        let llmCtx: Parameters<typeof hostLlm>[0] | undefined
-        try {
-          const maybe = (ctx as { llm?: Parameters<typeof hostLlm>[0] }).llm
-          // cordis proxy: bare property access does NOT throw — only touching
-          // the proxy does. Probe the method so a missing service degrades to
-          // undefined instead of blowing up later.
-          if (maybe && typeof (maybe as { listProviders?: unknown }).listProviders === 'function') {
-            llmCtx = maybe
-          }
-        } catch {
-          llmCtx = undefined // host without the llm service: custom channels still work
-        }
+        const usableLlm = readLlmService(ctx)
         let channel: Channel
         try {
-          channel = resolveChannel(channelKey, llmCtx)
+          channel = resolveChannel(channelKey, usableLlm)
         } catch (err) {
           return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) })
         }
-        const { llm } = getRuntime(channelKey, llmCtx)
+        const { llm } = getRuntime(channelKey, usableLlm)
         // Credential precedence, and the panel reports the very same order (see channelRow):
         //   1. channel.keyAlias — the host credential this channel NAMES (set in the settings panel)
         //   2. channel.keyEnv   — the host credential / environment variable for that name
@@ -909,10 +922,11 @@ export function apply(ctx: {
     // 结果是路由一个都不注册(实测 /api/busyloop/* 一直落到 /api 前缀围栏, 返回 401)。
     // ctx.get 是官方"不声明 inject 也能读服务"的入口, getter 让 deps.llm 每次请求现取。
     const deps = {
+      // Same verified reader the tool uses — one rule, one implementation (see readLlmService).
+      // A getter, not a value: the service is resolved per request, so a host that registers `llm`
+      // after this plugin mounts still works.
       get llm(): Parameters<typeof hostLlm>[0] | undefined {
-        try {
-          return (typeof ctx.get === 'function' ? ctx.get('llm') : undefined) as Parameters<typeof hostLlm>[0] | undefined
-        } catch { return undefined }
+        return readLlmService(ctx)
       },
       // The settings panel needs the credential service and the built-in channel table. Both are
       // read the same lazy, guarded way as `llm` above — a bare `ctx.credentials` would take the

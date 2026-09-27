@@ -335,6 +335,35 @@ test('routes: POST /credential stores through the host service, and never echoes
   });
 });
 
+test('the llm service is read through ctx.get, never through the ctx.llm property', async () => {
+  // The tool half used to do a bare `ctx.llm` inside a try/catch, with a comment claiming property
+  // access throws. The routes used `ctx.get('llm')`. Both now go through one reader, and this pins
+  // the rule down: a ctx whose `llm` property THROWS (which is what cordis's proxy does for an
+  // undeclared service) must still work, because nothing reads that property any more.
+  const mod = await fresh();
+  const registered = [];
+  const llm = {
+    listProviders: () => [{ id: 'deepseek' }],
+    stream() { return (async function* () {})(); },
+  };
+  const ctx = new Proxy(
+    { tools: { register: (def) => registered.push(def) }, get: (name) => (name === 'llm' ? llm : undefined) },
+    {
+      get(target, prop, receiver) {
+        if (prop === 'llm') throw new Error('cannot get property "llm" without inject');
+        return Reflect.get(target, prop, receiver);
+      },
+    },
+  );
+  assert.doesNotThrow(() => mod.apply(ctx), 'apply must not touch ctx.llm');
+
+  // And the reader itself degrades rather than throwing, for all three host shapes.
+  assert.equal(mod.readLlmService({ get: () => undefined }), undefined, 'service absent');
+  assert.equal(mod.readLlmService({}), undefined, 'host with no ctx.get at all');
+  assert.equal(mod.readLlmService({ get: () => { throw new Error('nope'); } }), undefined, 'ctx.get throws');
+  assert.equal(mod.readLlmService({ get: () => ({ listProviders: () => [] }) })?.listProviders().length, 0, 'a real service is returned');
+});
+
 test('routes: a wrong method is 405 and every panel route still passes the fence', async () => {
   await withTempConfig(async () => {
     const mod = await fresh();

@@ -758,6 +758,18 @@ function resolveSystem(custom, discipline) {
 ${customStr}`;
   return DISCIPLINE_SYSTEM;
 }
+function readLlmService(ctx) {
+  let candidate;
+  try {
+    candidate = typeof ctx?.get === "function" ? ctx.get("llm") : void 0;
+  } catch {
+    return void 0;
+  }
+  if (candidate && typeof candidate.listProviders === "function") {
+    return candidate;
+  }
+  return void 0;
+}
 function registerBusyloopRun(ctx) {
   ctx.tools?.register(
     defineTool({
@@ -815,22 +827,14 @@ function registerBusyloopRun(ctx) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       async execute(args, exec) {
         const channelKey = String(args.channel ?? "ark");
-        let llmCtx;
-        try {
-          const maybe = ctx.llm;
-          if (maybe && typeof maybe.listProviders === "function") {
-            llmCtx = maybe;
-          }
-        } catch {
-          llmCtx = void 0;
-        }
+        const usableLlm = readLlmService(ctx);
         let channel;
         try {
-          channel = resolveChannel(channelKey, llmCtx);
+          channel = resolveChannel(channelKey, usableLlm);
         } catch (err) {
           return JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) });
         }
-        const { llm } = getRuntime(channelKey, llmCtx);
+        const { llm } = getRuntime(channelKey, usableLlm);
         let credential = channel.keyAlias ? await resolveCredential(ctx, channel.keyAlias, void 0) : void 0;
         if (!credential) {
           credential = await resolveCredential(ctx, channel.keyEnv, process.env[channel.keyEnv]);
@@ -940,12 +944,11 @@ function apply(ctx) {
       webCtx.webServer.register({ kind, path, handler });
     };
     const deps = {
+      // Same verified reader the tool uses — one rule, one implementation (see readLlmService).
+      // A getter, not a value: the service is resolved per request, so a host that registers `llm`
+      // after this plugin mounts still works.
       get llm() {
-        try {
-          return typeof ctx.get === "function" ? ctx.get("llm") : void 0;
-        } catch {
-          return void 0;
-        }
+        return readLlmService(ctx);
       },
       // The settings panel needs the credential service and the built-in channel table. Both are
       // read the same lazy, guarded way as `llm` above — a bare `ctx.credentials` would take the
@@ -979,6 +982,7 @@ export {
   mask as maskCredential,
   name,
   readChannels as readChannelConfig,
+  readLlmService,
   registerHttpRoutes,
   remove as removeCredential,
   resolveCredential,

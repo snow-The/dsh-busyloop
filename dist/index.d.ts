@@ -66,6 +66,21 @@ export declare function resolveCredential(ctx: unknown, keyEnv: string, envOverr
  */
 export declare const DISCIPLINE_SYSTEM: string;
 /**
+ * Read the host llm service the official inject-free way, or undefined when there is none.
+ *
+ * ONE implementation for both halves of this plugin, because they used to disagree: the routes went
+ * through `ctx.get('llm')` while the tool did a bare `ctx.llm` inside a try/catch with a comment
+ * claiming property access throws. It does not — cordis's proxy throws when a REGISTERED service is
+ * read through an undeclared inject, and `ctx.get(name)` is the documented way to read without
+ * declaring. `ctx.get` itself throws for a service this host does not register, so the guard stays.
+ *
+ * The `listProviders` probe is kept on top: it separates "the service exists" from "the service is
+ * the LLM runtime we expect", and a custom channel works with neither.
+ */
+export declare function readLlmService(ctx: {
+    get?: (name: string) => unknown;
+} | undefined): Parameters<typeof hostLlm>[0] | undefined;
+/**
  * Plugin entry: mount health/providers endpoints + register the agent tool.
  * ctx.tools is optional — hosts without a tool registry still get the engine.
  */
