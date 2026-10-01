@@ -38,16 +38,29 @@ const result = await engine.run({
 
 纯库方式:`hostLlm(ctx.llm)` → `runBusyLoop(llm, options)`。
 
-## HTTP 端点(仅当宿主提供 http.mount 时挂载)
+## HTTP 端点(经 ctx.webServer 注册)
 
-| 端点 | 说明 |
-|---|---|
-| `/health` | 引擎存活 + hostLlm 状态 |
-| `/providers` | 宿主已注册的 LLM provider 列表 |
+宿主一旦提供 `webServer`(dsh-web-app 就会),以下端点即生效:
 
-> ⚠️ 注意:官方宿主当前**未注入** `ctx.http.mount`,这些端点默认不暴露(404)。
-> 引擎的正确使用方式是库 API:`createBusyLoop(ctx)` / `runBusyLoop(llm, opts)`(见上方用法)。
-> 端点代码保留,供未来提供 http.mount 的宿主使用。
+| 端点 | 方法 | 说明 |
+|---|---|---|
+| `/api/busyloop/health` | GET | 引擎存活 + hostLlm 状态 |
+| `/api/busyloop/providers` | GET | 宿主已注册的 LLM provider 列表 |
+| `/api/busyloop/channels` | GET | 已配置的通道 |
+| `/api/busyloop/channel` | POST | 新增/修改通道 |
+| `/api/busyloop/credentials` | GET | 凭据来源(不回显密钥) |
+| `/api/busyloop/credential` | POST | 写入凭据 |
+| `/api/busyloop/test` | POST | 通道连通性测试 |
+
+> **历史更正。** 本 README 早先写着「官方宿主当前未注入 `ctx.http.mount`,这些端点默认不暴露(404)」——
+> 那是**当时的真实情况,但已不再成立**,而且端点名也早已改前缀。
+>
+> 根因是 `ctx.http` **不是 DSH 的服务**(官方 ctx 服务面里没有它),所以那条路由从来没挂上过,还白背了一个
+> `hono` 依赖。现在改为官方的 `ctx.inject(['webServer'], …)`,并且:
+>
+> - **不能用 `ctx.get('webServer')`** —— 它是时点快照;webServer 若后挂载,你就永远漏注册,且不报错。
+> - 每个端点先过 **Host/Origin + 浏览器鉴权围栏**(`connection.requestRejection`),伪造请求 403、匿名请求 401;
+>   围栏读不到时**失败关闭**(503),不会静默放行。
 
 ## 测试金字塔(14 个测试)
 
