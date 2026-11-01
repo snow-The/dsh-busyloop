@@ -44,10 +44,6 @@
     },
     "compatibility": {
       "dshReleases": [
-        "0.2.0-rc.1",
-        "0.2.0-rc.2",
-        "0.2.1-rc.2",
-        "0.2.1-rc.3",
         "0.2.1-rc.5"
       ],
       "verifiedAgainst": "0.2.1-rc.5"
@@ -58,10 +54,10 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.0",
-    "@deepseek-ai/dsh": ">=0.2.0-rc.1",
-    "@deepseek-ai/dsh-llm": ">=0.2.0-rc.1",
-    "@deepseek-ai/dsh-llm-deepseek": ">=0.2.0-rc.1",
-    "@deepseek-ai/dsh-tools": ">=0.2.0-rc.1"
+    "@deepseek-ai/dsh": ">=0.2.1-rc.5",
+    "@deepseek-ai/dsh-llm": ">=0.2.1-rc.5",
+    "@deepseek-ai/dsh-llm-deepseek": ">=0.2.1-rc.5",
+    "@deepseek-ai/dsh-tools": ">=0.2.1-rc.5"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.5",
@@ -74,6 +70,6 @@
     "typescript": "^5.9.3"
   },
   "engines": {
-    "dsh": ">=0.2.1-rc.2"
+    "dsh": ">=0.2.1-rc.5"
   }
 }

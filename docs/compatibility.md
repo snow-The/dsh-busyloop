@@ -3,7 +3,7 @@
 > 本文件由 `~/.dsh-starter/plugins/_p0/gen-compat-docs.mjs` 从插件清单与宿主实测**生成**。
 > **请勿手改** —— 手改的内容会被下一次生成覆盖。要改，改生成器或改 `package.json`。
 >
-> 生成器版本 `1.0.0` · 宿主 `0.2.0-rc.2` · 插件 `@snow-the/dsh-busyloop@0.1.26`
+> 生成器版本 `1.0.0` · 宿主 `0.2.0-rc.2` · 插件 `@snow-the/dsh-busyloop@0.1.27`
 >
 > 代际下界与 `dshReleases` 的**单一事实源**是 `_p0/floor.json`。切换世代改那一个文件，然后重跑本生成器。
 
@@ -11,10 +11,10 @@
 
 | 项 | 值 |
 |---|---|
-| `dsh.compatibility.dshReleases` | ["0.2.0-rc.1","0.2.0-rc.2"] |
-| `dsh.compatibility.verifiedAgainst` | `0.2.0-rc.2` |
-| 官方 peer 声明 | `dsh` >=0.2.0-rc.1<br>`dsh-llm` >=0.2.0-rc.1<br>`dsh-llm-deepseek` >=0.2.0-rc.1<br>`dsh-tools` >=0.2.0-rc.1 |
-| 本次宿主判定（`0.2.0-rc.2`） | **PASS** |
+| `dsh.compatibility.dshReleases` | ["0.2.1-rc.5"] |
+| `dsh.compatibility.verifiedAgainst` | `0.2.1-rc.5` |
+| 官方 peer 声明 | `dsh` >=0.2.1-rc.5<br>`dsh-llm` >=0.2.1-rc.5<br>`dsh-llm-deepseek` >=0.2.1-rc.5<br>`dsh-tools` >=0.2.1-rc.5 |
+| 本次宿主判定（`0.2.0-rc.2`） | **FAIL** |
 
 ## 门禁到底是什么（宿主实际执行的判定）
 
@@ -41,9 +41,9 @@
 用**宿主自己的** `evaluatePluginCompatibility`（不是我们自己实现的等价物）在本机安装树的版本上判定本插件的真实 `package.json`：
 
 ```
-插件        @snow-the/dsh-busyloop@0.1.26
+插件        @snow-the/dsh-busyloop@0.1.27
 宿主        0.2.0-rc.2
-判定        PASS（peerDependencies 无冲突，不会被禁用）
+判定        FAIL  {"@deepseek-ai/dsh":">=0.2.1-rc.5","@deepseek-ai/dsh-llm":">=0.2.1-rc.5","@deepseek-ai/dsh-llm-deepseek":">=0.2.1-rc.5","@deepseek-ai/dsh-tools":">=0.2.1-rc.5"}
 ```
 
 **这个判定的含义要说清楚：它只证明「宿主不会在预检阶段禁用本插件」。它不证明插件能正常工作。**
@@ -74,7 +74,7 @@
 connection, credentials, effect, get, http, inject, llm, locale, slots, tools, webServer
 ```
 
-客户端面：`dsh.client.platform = "web"`，`inject = ["@deepseek-ai/dsh-client-locale","@deepseek-ai/dsh-client-ui-conversation","@deepseek-ai/dsh-client-ui-primitives"]`。
+客户端面：`dsh.client.platform = "web"`，`inject = ["@deepseek-ai/dsh-client-locale","@deepseek-ai/dsh-client-ui-conversation"]`。
 
 `dsh.client.inject` 列的是**包名**（客户端模块图里必须先加载的包），与服务注入（模块自己 `exports.inject` 里的**服务名**，如 `slots`/`locale`/`sessions`）**是两回事**。
 
