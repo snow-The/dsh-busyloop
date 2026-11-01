@@ -235,17 +235,12 @@ async function remove(service, ref) {
 }
 
 // src/loop.ts
-import { BlockAssembler } from "@deepseek-ai/dsh-llm";
+import { BlockAssembler, createToolResultMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
 function textBlock(text) {
   return { type: "text", text };
 }
-function toolResultMessage(toolCallId, text, isError) {
-  return {
-    role: "user",
-    content: [
-      { type: "tool-result", toolCallId, content: [textBlock(text)], isError }
-    ]
-  };
+function toolResultMessage(callId, text, isError) {
+  return createToolResultMessage({ callId, content: [textBlock(text)], isError });
 }
 function sleep(ms) {
   if (!(ms > 0)) return Promise.resolve();
@@ -263,7 +258,9 @@ async function runBusyLoop(llm, opts) {
   const maxTurns = opts.maxTurns ?? 8;
   const toolMap = new Map((opts.tools ?? []).map((t) => [t.name, t]));
   const messages = [
-    { role: "user", content: [textBlock(opts.prompt)] }
+    // rc.5：每條消息都有穩定身分與生產者來源（`id` + `source`），
+    // 由官方工廠產生，不要自己拼物件——拼出來的缺欄位，型別過不了，執行期也對不上。
+    createUserMessage({ content: [textBlock(opts.prompt)], source: { kind: "user" } })
   ];
   let turns = 0;
   let toolCalls = 0;
@@ -290,7 +287,7 @@ async function runBusyLoop(llm, opts) {
     };
     const asm = new BlockAssembler();
     for await (const chunk of llm.stream(gen)) asm.push(chunk);
-    const msg = asm.message();
+    const msg = asm.message({ provider: opts.provider, model: opts.model });
     usage = asm.usage;
     finish = asm.finish?.kind ?? "stop";
     messages.push(msg);
@@ -395,7 +392,7 @@ function registerHttpRoutes(deps, register) {
     req.on("error", reject);
   });
   const route = (method, run) => async (req, res) => {
-    if (rejected ? rejected(req, res) : false) return;
+    if (fenceOf()(req, res)) return;
     if (req.method !== method) {
       res.statusCode = 405;
       res.setHeader("allow", method);
@@ -417,7 +414,12 @@ function registerHttpRoutes(deps, register) {
       sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) });
     }
   };
-  const fenceOf = () => rejected ?? (() => false);
+  const fenceOf = () => rejected ?? ((_req, res) => {
+    res.statusCode = 503;
+    res.setHeader("content-type", "application/json; charset=utf-8");
+    res.end(JSON.stringify({ error: "connection service unavailable: the Host/Origin fence cannot be applied" }));
+    return true;
+  });
   const getOnly = (reject, req, res, run) => {
     if (reject(req, res)) return;
     if (req.method !== "GET") {

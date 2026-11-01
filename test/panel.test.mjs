@@ -56,7 +56,11 @@ function captureRoutes(deps) {
   // resolve, and the built-in table is a module constant). Tests want to pass a plain object, so
   // adapt here rather than making every call site remember the shape. (Measured: passing the object
   // straight through made five panel routes answer 500 "deps.builtins is not a function".)
-  const adapted = { ...deps, builtins: typeof deps.builtins === 'function' ? deps.builtins : () => deps.builtins };
+  // An ADMITTING fence by default: these cases are about the panel handlers, not the fence. The
+  // fence itself is covered by busyloop.test.mjs (through apply(), so the real createRequestFence
+  // runs) and by the one case below that passes its own `rejected`. Since the product default is
+  // now fail-CLOSED, a caller that omits `rejected` would otherwise get 503 on every route.
+  const adapted = { rejected: () => false, ...deps, builtins: typeof deps.builtins === 'function' ? deps.builtins : () => deps.builtins };
   delete adapted.__mod;
   mod.registerHttpRoutes(adapted, (kind, path, handler) => {
     routes.set(path, { kind, handler });

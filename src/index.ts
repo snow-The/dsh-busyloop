@@ -193,7 +193,7 @@ export function registerHttpRoutes(
     method: 'GET' | 'POST' | 'DELETE',
     run: (body: Record<string, unknown>, req: IncomingMessage, res: ServerResponse) => void | Promise<void>,
   ) => async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    if (rejected ? rejected(req, res) : false) return
+    if (fenceOf()(req, res)) return
     if (req.method !== method) {
       res.statusCode = 405
       res.setHeader('allow', method)
@@ -219,13 +219,19 @@ export function registerHttpRoutes(
    * request, not a wrong status code. The bundler even renamed the local parameter to `rejected2` to
    * avoid a shadowing conflict, which is the tell: there was no outer binding to shadow.
    *
-   * It is optional now and falls back to a fence that ADMITS, so `registerHttpRoutes(deps, reg)`
-   * works for a caller that supplies only what it needs, while an explicit `deps.rejected` still
-   * overrides. A route that cannot resolve a fence must not be the difference between working and
-   * throwing -- see `createRequestFence` for the fail-closed path used by the plugin itself.
+   * It is optional so `registerHttpRoutes(deps, reg)` works for a caller that supplies only what
+   * it needs, while an explicit `deps.rejected` still overrides. It does NOT fall back to admitting:
+   * a route that cannot resolve a fence answers 503 and never forwards, exactly like
+   * `createRequestFence` does when the connection service is unreachable. Admitting here would make
+   * busyloop the one plugin out of six that opens its panel when the host has no fence.
    */
   const fenceOf = (): ((req: IncomingMessage, res: ServerResponse) => boolean) =>
-    rejected ?? (() => false)
+    rejected ?? ((_req, res) => {
+      res.statusCode = 503
+      res.setHeader('content-type', 'application/json; charset=utf-8')
+      res.end(JSON.stringify({ error: 'connection service unavailable: the Host/Origin fence cannot be applied' }))
+      return true
+    })
   const getOnly = (reject: (req: IncomingMessage, res: ServerResponse) => boolean, req: IncomingMessage, res: ServerResponse, run: () => void): void => {
     if (reject(req, res)) return
     if (req.method !== 'GET') {

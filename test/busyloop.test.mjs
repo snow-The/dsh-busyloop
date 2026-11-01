@@ -98,9 +98,17 @@ test('tool receives parsed arguments and result is fed back', async () => {
   })
   assert.deepEqual(received, { text: 'hello world' })
   assert.equal(result.output, 'done')
-  // second call must include the tool result message
+  // 第二個請求必須帶一條 **tool 角色**的消息，而且它回答的正是這次呼叫。
+  // 舊寫法檢查字串裡有沒有 'tool-result' —— 那是 rc.2 的內容塊型別，
+  // rc.5 的 `ContentBlockMap` 已經沒有它（結果升級成一等消息）。
+  // 這裡斷言的是**契約**：role、來源、以及回答的是哪一個 callId。
   const second = seenOptions()[1]
-  assert.ok(second.messages.some((m) => JSON.stringify(m).includes('tool-result')))
+  const feedback = second.messages.find((m) => m.role === 'tool')
+  assert.ok(feedback, 'second request must carry a tool-role message')
+  assert.equal(feedback.source?.kind, 'tool')
+  assert.equal(String(feedback.source?.callId), 'c9')
+  assert.equal(String(feedback.toolCallId), 'c9')
+  assert.ok(JSON.stringify(feedback.content).includes('ok'), 'tool content must carry the result text')
 })
 
 test('no tools: single turn completes', async () => {
@@ -188,7 +196,10 @@ function captureRoutes(deps) {
   // `deps` goes straight through: `rejected` is optional on the route helper now, so a caller that
   // supplies only { llm } (or nothing) still gets working routes. Before that fix every route threw
   // `rejected is not defined` on the first request -- see the fence note in src/index.ts.
-  registerHttpRoutes(deps ?? {}, (kind, path, handler) => { routes.set(path, { kind, handler }); });
+  // An ADMITTING fence by default: these cases are about the handlers, not the fence. The
+  // fence has its own cases at the bottom, which go through apply() so the real
+  // createRequestFence runs. A caller may still override via deps.rejected.
+  registerHttpRoutes({ rejected: () => false, ...(deps ?? {}) }, (kind, path, handler) => { routes.set(path, { kind, handler }); });
   const call = async (path, method = 'GET') => {
     const route = routes.get(path);
     if (!route) throw new Error('no route registered at ' + path);
@@ -447,4 +458,88 @@ test('resolveCredential falls back to the file, and degrades when the service th
     else process.env.HOME = prevHomePosix
     await rm(home, { recursive: true, force: true })
   }
+})
+
+
+// ---------------------------------------------------------------------------------------------
+// Official Host/Origin + browser-auth fence (copied from @deepseek-ai/dsh-host-open-in-app; the
+// provenance block in src/index.ts names the exact official lines).
+//
+// DISCRIMINATING, by construction: every case asserts BOTH the status AND that the handler's own
+// payload was never produced (`res.body === undefined` and no content-type). Status alone cannot
+// prove our fence ran -- the platform also rejects /api requests by itself (see
+// _recover/verify-webServer-routes.mjs, CTRL-B), and that control is deliberately kept red.
+// Remove the guard from the handler and every case below goes red; that is verified by
+// _recover/reverse-verify-fence.mjs, which disarms the built artifact and requires the suite to fail.
+// ---------------------------------------------------------------------------------------------
+
+/** Mount the panel routes through apply(), so the REAL createRequestFence runs. */
+function mountViaApply(rejection) {
+  const routes = new Map()
+  apply({
+    inject: (_deps, cb) => cb({
+      webServer: { register: (r) => { routes.set(r.path, r); return () => {} } },
+      effect: (fn) => fn(),
+    }),
+    get: (name) => (name === 'connection'
+      ? (rejection === 'unavailable' ? undefined : { requestRejection: () => rejection })
+      : undefined),
+    tools: { register: () => {} },
+  })
+  return routes
+}
+
+const FENCE_ROUTES = ['/api/busyloop/health', '/api/busyloop/providers']
+
+async function driveFence(routes, path, method = 'GET') {
+  const route = routes.get(path)
+  assert.ok(route, 'route not registered: ' + path)
+  const res = { statusCode: 0, headers: {}, body: undefined, setHeader(k, v) { this.headers[k] = v; }, end(b) { this.body = b; } }
+  await route.handler({ method, url: path }, res)
+  return res
+}
+
+test('fence: a 401 from the connection service is answered 401 and the handler never runs', async () => {
+  const routes = mountViaApply(401)
+  for (const path of FENCE_ROUTES) {
+    const res = await driveFence(routes, path)
+    assert.equal(res.statusCode, 401)
+    assert.equal(res.body, undefined, 'the handler payload must not be produced')
+    assert.equal(res.headers['content-type'], undefined, 'the JSON responder must not run')
+  }
+})
+
+test('fence: a 403 from the connection service is answered 403 and the handler never runs', async () => {
+  const routes = mountViaApply(403)
+  for (const path of FENCE_ROUTES) {
+    const res = await driveFence(routes, path)
+    assert.equal(res.statusCode, 403)
+    assert.equal(res.body, undefined, 'the handler payload must not be produced')
+    assert.equal(res.headers['content-type'], undefined, 'the JSON responder must not run')
+  }
+})
+
+test('fence: an unreachable connection service fails CLOSED with 503, never forwarding', async () => {
+  const routes = mountViaApply('unavailable')
+  for (const path of FENCE_ROUTES) {
+    const res = await driveFence(routes, path)
+    assert.equal(res.statusCode, 503, 'a missing fence must NOT fall through to the handler')
+    assert.match(String(res.body), /unavailable/)
+  }
+})
+
+test('fence: routes registered WITHOUT a fence fail closed, not open', async () => {
+  // The product-side default: registerHttpRoutes({}) has no deps.rejected at all. It used to fall
+  // back to an ADMITTING fence (fail-open); it must now answer 503 like every other plugin.
+  const routes = new Map()
+  registerHttpRoutes({}, (kind, path, handler) => { routes.set(path, { kind, handler }); })
+  const res = await driveFence(routes, '/api/busyloop/health')
+  assert.equal(res.statusCode, 503, 'an absent fence must refuse, not serve')
+  assert.match(String(res.body), /unavailable/)
+})
+
+test('fence: the fence runs BEFORE the method check', async () => {
+  const routes = mountViaApply(403)
+  const res = await driveFence(routes, FENCE_ROUTES[0], 'POST')
+  assert.equal(res.statusCode, 403, 'a rejected request must not be downgraded to 405')
 })

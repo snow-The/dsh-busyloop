@@ -1,5 +1,5 @@
-import { BlockAssembler } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, Message, ToolCallBlock } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, Message, ToolCallBlock, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { HostLlm } from './llm.ts'
 import type { BusyLoopOptions, LoopResult, LoopTool } from './types.ts'
 
@@ -7,13 +7,12 @@ function textBlock(text: string) {
   return { type: 'text' as const, text }
 }
 
-function toolResultMessage(toolCallId: string, text: string, isError: boolean): Message {
-  return {
-    role: 'user',
-    content: [
-      { type: 'tool-result', toolCallId, content: [textBlock(text)], isError },
-    ],
-  } as Message
+// rc.5：tool 結果不再是塞在 user 消息裡的 `tool-result` 內容塊
+// （`ContentBlockMap` 已經沒有這個 type），而是**一等的 `role:'tool'` 消息**，
+// 由官方 `createToolResultMessage` 產生，並帶 `source: {kind:'tool', callId}`。
+// 手搓的消息體在 rc.5 上既通不過型別，也沒有對應的 block 型別。
+function toolResultMessage(callId: ToolCallId, text: string, isError: boolean): Message {
+  return createToolResultMessage({ callId, content: [textBlock(text)], isError })
 }
 
 function sleep(ms: number): Promise<void> {
@@ -41,7 +40,9 @@ export async function runBusyLoop(llm: HostLlm, opts: BusyLoopOptions): Promise<
   const toolMap = new Map<string, LoopTool>((opts.tools ?? []).map((t) => [t.name, t]))
 
   const messages: Message[] = [
-    { role: 'user', content: [textBlock(opts.prompt)] } as Message,
+    // rc.5：每條消息都有穩定身分與生產者來源（`id` + `source`），
+    // 由官方工廠產生，不要自己拼物件——拼出來的缺欄位，型別過不了，執行期也對不上。
+    createUserMessage({ content: [textBlock(opts.prompt)], source: { kind: 'user' } }),
   ]
 
   let turns = 0
@@ -74,7 +75,10 @@ export async function runBusyLoop(llm: HostLlm, opts: BusyLoopOptions): Promise<
 
     const asm = new BlockAssembler()
     for await (const chunk of llm.stream(gen)) asm.push(chunk)
-    const msg = asm.message()
+    // rc.5：message() 需要生產者資訊（provider/model），因為 assistant 消息現在
+    // 必須自己帶 `source: {kind:'model', provider, model}`。少了它，這條消息在
+    // 後續請求裡無法被歸因，型別也不允許。
+    const msg = asm.message({ provider: opts.provider, model: opts.model })
     usage = asm.usage
     finish = asm.finish?.kind ?? 'stop'
     messages.push(msg)
