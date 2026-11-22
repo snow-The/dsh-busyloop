@@ -1,6 +1,10 @@
 {
   "name": "@snow-the/dsh-busyloop",
   "version": "0.1.27",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/snow-The/dsh-busyloop.git"
+  },
   "description": "DSH agent-loop engine: host-LLM adapter (official ctx.llm channel) + lightweight loop skeleton + agent tool busyloop_run (one-off tasks on ark/direct channels, main-model tokens untouched). Capability layer — codex style is opt-in via dsh-busyloop-codexstyle.",
   "type": "module",
   "main": "./dist/index.js",
